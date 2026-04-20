@@ -9,6 +9,13 @@ alwaysApply: true
 - 写作风格：自然、直接、清晰；先结论后依据；避免模板化空话。
 - 股票行情相关请求默认先执行：
   - `python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output`
+- 若用户明确要看**研报线索**、**机构观点**、**行业/板块资金与配置叙事**（不等同于交易所逐笔资金流），在行情命令基础上追加研报客搜索：
+  - 多标的默认（用标的名称做关键词）：  
+    `python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output --with-research --research-n 5`
+  - 单标的且用户给了研报关键词（含板块名/主题词）：  
+    `python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir Stock_Analysis/output --with-research --research-n 5 --research-keyword "<关键词>"`
+  - 说明：研报客输出写入 `Stock_Analysis/output/research/<UTC日期>/`；`full_report.md` / `ai_overview.json` 会附带摘要字段；**搜索不要求 API Key**，下载才需要 `YANBAOKE_API_KEY`（见 `Stock_Analysis/tools/yanbaoke/SKILL.md`）。
+  - 边界：研报客提供的是**研报检索与摘要线索**，不是保证准确的实时“主力资金净流入”数据；若用户要的是交易所级资金流，应明确说明本项目当前不做该数据源。
 - 若用户想看**新的股票**，先更新 `Stock_Analysis/market_config.json`：
   - 在 `assets` 追加 `symbol` / `name` / `market` / `data_symbol`
   - 需要默认纳入简报时，再把 `symbol` 加入 `default_symbols`

@@ -358,7 +358,7 @@ def compute_ohlc_stats(rows: list[dict[str, Any]], *, interval: str) -> dict[str
     }
 
 
-def format_report_card(asset: dict[str, str], stats: dict[str, Any]) -> str:
+def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
     symbol = asset["symbol"]
     name = asset.get("name") or symbol
     market = asset.get("market") or "UNK"
@@ -393,6 +393,26 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any]) -> str:
             f"- **Fib区间**：现价位于 `{stats.get('price_vs_fib_zone', 'unknown')}`；"
             f"0.382={_fmt_px(fib['0.382'])}，0.5={_fmt_px(fib['0.5'])}，0.618={_fmt_px(fib['0.618'])}\n"
         )
+    if research and isinstance(research, dict):
+        items = research.get("items") or []
+        total = research.get("total")
+        kw = str(research.get("keyword") or "").strip()
+        if items:
+            lines.append(
+                "- **研报参考（yanbaoke 搜索）**："
+                f"关键词 `{kw}`；命中 {len(items)} 条"
+                + (f"（接口 total={total}）" if isinstance(total, int) else "")
+                + "\n"
+            )
+            for it in items[:3]:
+                title = str(it.get("title") or "").strip()
+                url = str(it.get("url") or "").strip()
+                org = str(it.get("org_name") or "").strip()
+                tail = f"（{org}）" if org else ""
+                if title and url:
+                    lines.append(f"  - [{title}]({url}){tail}\n")
+                elif title:
+                    lines.append(f"  - {title}{tail}\n")
     lines.append(
         "- **威科夫背景过滤（v1）**："
         f"bias={bg.get('bias', 'neutral')}，state={bg.get('state', 'N/A')}，"
@@ -418,10 +438,18 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any]) -> str:
     return "".join(lines) + "\n"
 
 
-def format_brief_line(asset: dict[str, str], stats: dict[str, Any]) -> str:
+def format_brief_line(asset: dict[str, str], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
     symbol = asset["symbol"]
     name = asset.get("name") or symbol
+    extra = ""
+    if research and isinstance(research, dict):
+        items = research.get("items") or []
+        total = research.get("total")
+        if items:
+            extra = f"，研报命中 {len(items)}"
+            if isinstance(total, int):
+                extra += f"/{total}"
     return (
         f"- {name}（{symbol}）: {stats.get('trend', 'N/A')}，"
-        f"现价 {_fmt_px(float(stats['last']))}，Fib区 `{stats.get('price_vs_fib_zone', 'unknown')}`"
+        f"现价 {_fmt_px(float(stats['last']))}，Fib区 `{stats.get('price_vs_fib_zone', 'unknown')}`{extra}"
     )

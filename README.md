@@ -30,6 +30,14 @@
 pip install -r Stock_Analysis/requirements.txt
 ```
 
+如需启用研报客（yanbaoke）搜索，请额外安装 Node.js 18+：
+
+```bash
+sudo apt update
+sudo apt install -y nodejs npm
+node -v
+```
+
 ## 3. 快速开始
 
 ```bash
@@ -53,6 +61,9 @@ python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir 
 
 # 统计历史开单策略（周/月）
 python3 Stock_Analysis/trade_journal_stats.py --journal Stock_Analysis/output/trade_journal.jsonl
+
+# 附带研报搜索（写入 output/research/<UTC日期>/）
+python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output --with-research --research-n 3
 ```
 
 ## 4. 配置文件
@@ -95,6 +106,10 @@ python3 Stock_Analysis/trade_journal_stats.py --journal Stock_Analysis/output/tr
   - `status=filled` 表示本次快照已触发；`status=pending` 表示方向一致待触发；`status=watch` 表示仅观察；
   - 脚本会自动刷新 `trade_journal_stats_latest.md/json` 与 `trade_journal_readable.md`；
   - `trade_journal_readable.md` 默认按 `idea_id` 仅保留“最新状态”一行，避免历史重复刷屏。
+- 研报客（yanbaoke）说明：
+  - 脚本位于 `Stock_Analysis/tools/yanbaoke/`（不依赖 OpenClaw）；
+  - Python 封装见 `Stock_Analysis/yanbaoke_client.py`（`subprocess` 调用 `node search.mjs`）；
+  - 搜索免费；下载需要 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
 
 ## 6. v1 交易辅助解读（威科夫 + 123）
 

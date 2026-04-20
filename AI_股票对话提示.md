@@ -10,16 +10,28 @@
 
 以下说法都视为同一类任务：看行情 / 跑简报 / 复查看法 / 看某只 A 股或美股。
 
+若用户额外提到：**研报** / **机构观点** / **行业或板块资金与配置叙事**（研报层面的“资金/配置/加仓减仓”表述），则视为需要启用 **研报客（yanbaoke）搜索**（不等同于交易所逐笔资金流）。
+
 你必须执行：
 
 1. 先确认本次标的列表。
 2. 若用户提到新股票（配置里没有），先更新 `Stock_Analysis/market_config.json`：
    - 在 `assets` 增加 `symbol` / `name` / `market` / `data_symbol`
    - 若要纳入默认简报，再把 `symbol` 加入 `default_symbols`
-3. 运行命令：
+3. 运行命令（二选一）：
 
 ```bash
+# A) 仅行情结构（默认）
 python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output
+
+# B) 行情结构 + 研报线索（需要 Node.js；搜索不要求 API Key）
+python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output --with-research --research-n 5
+```
+
+单标的且用户给了板块/主题关键词时：
+
+```bash
+python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir Stock_Analysis/output --with-research --research-n 5 --research-keyword "<关键词>"
 ```
 
 ## 2) 读取顺序（固定，不可颠倒）
@@ -29,6 +41,10 @@ python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir 
 1. `Stock_Analysis/output/<UTC日期>/ai_brief.md`
 2. `Stock_Analysis/output/<UTC日期>/ai_overview.json`
 3. `Stock_Analysis/output/<UTC日期>/full_report.md`
+
+若本轮启用了研报搜索，再补充读取（用于核对标题/链接/命中条数）：
+
+4. `Stock_Analysis/output/research/<UTC日期>/*_research.json`（优先读与本次关键词对应的文件）
 
 补充要求：
 
@@ -46,6 +62,10 @@ python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir 
 3. 触发条件（多/空各自成立条件）
 4. 风险点（至少 1 条）
 5. 免责声明（技术分析演示，不构成投资建议）
+
+若本轮包含研报搜索结果，还必须额外给一小段（可并入“风险点/触发条件”附近，但不要省略）：
+
+- **研报线索**：用 2-4 条要点概括“机构在说什么/资金与配置叙事”，并明确这是研报文本线索，不是交易所官方资金流统计。
 
 ## 4) 威科夫 + 123 解读约束（强制）
 

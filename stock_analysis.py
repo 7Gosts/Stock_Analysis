@@ -19,6 +19,7 @@ from typing import Any
 from analysis_engine import compute_ohlc_stats, format_brief_line, format_report_card
 from data_providers import fetch_ohlcv
 from trade_journal_stats import write_latest_stats
+from yanbaoke_client import write_research_bundle
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -177,6 +178,14 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=180, help="K线根数，默认 180")
     p.add_argument("--out-dir", default=str(SCRIPT_DIR / "output"), help="输出根目录")
     p.add_argument("--report-only", action="store_true", help="兼容旧参数；当前默认仅输出报告")
+    p.add_argument("--with-research", action="store_true", help="启用研报客（yanbaoke）搜索并写入 output/research/")
+    p.add_argument("--research-n", type=int, default=3, help="研报搜索结果条数，默认 3（最大 500）")
+    p.add_argument("--research-type", default="title", help="研报搜索类型：title 或 content，默认 title")
+    p.add_argument(
+        "--research-keyword",
+        default=None,
+        help="研报搜索关键词（可选；未指定则默认用标的名称）",
+    )
     args = p.parse_args()
 
     if not args.market_brief and not args.symbol:
@@ -203,6 +212,7 @@ def main() -> int:
     out_base = Path(args.out_dir).resolve()
     session_dir = out_base / _utc_day(now_utc)
     session_dir.mkdir(parents=True, exist_ok=True)
+    research_dir = out_base / "research" / _utc_day(now_utc)
 
     cards: list[str] = []
     briefs: list[str] = []
@@ -231,8 +241,22 @@ def main() -> int:
             print(f"[跳过] {symbol} 指标计算失败", file=sys.stderr)
             continue
 
-        cards.append(format_report_card(asset, stats))
-        briefs.append(format_brief_line(asset, stats))
+        research: dict[str, Any] | None = None
+        if args.with_research:
+            kw = (args.research_keyword or asset.get("name") or asset["symbol"]).strip()
+            try:
+                research = write_research_bundle(
+                    out_dir=research_dir,
+                    keyword=kw,
+                    n=args.research_n,
+                    search_type=args.research_type,
+                )
+            except Exception as e:
+                print(f"[研报] {symbol} 搜索失败（已跳过）：{e}", file=sys.stderr)
+                research = None
+
+        cards.append(format_report_card(asset, stats, research=research))
+        briefs.append(format_brief_line(asset, stats, research=research))
         overview.append(
             {
                 "symbol": asset["symbol"],
@@ -241,6 +265,7 @@ def main() -> int:
                 "provider": args.provider,
                 "interval": args.interval,
                 "stats": stats,
+                "research": research,
             }
         )
         idea = build_trade_journal_entry(
