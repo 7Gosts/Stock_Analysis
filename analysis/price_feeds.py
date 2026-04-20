@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .gold_api import fetch_ohlcv_goldapi
+
 
 def _lazy_ak_import():
     import akshare as ak
@@ -264,4 +266,6 @@ def fetch_ohlcv(provider: str, ticker: str, market: str, interval: str, limit: i
         return fetch_ohlcv_tickflow(ticker=ticker, market=market, interval=interval, limit=limit)
     if p == "alltick":
         return fetch_ohlcv_alltick(ticker=ticker, market=market, interval=interval, limit=limit)
-    raise ValueError(f"暂不支持的 provider: {provider}（支持 akshare/tickflow/alltick）")
+    if p in {"goldapi", "gold-api", "gold_api"}:
+        return fetch_ohlcv_goldapi(ticker=ticker, market=market, interval=interval, limit=limit)
+    raise ValueError(f"暂不支持的 provider: {provider}（支持 akshare/tickflow/alltick/goldapi）")

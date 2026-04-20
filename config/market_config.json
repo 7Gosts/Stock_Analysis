@@ -40,6 +40,12 @@
       "name": "Microsoft",
       "market": "US",
       "data_symbol": "MSFT"
+    },
+    {
+      "symbol": "AU9999",
+      "name": "上海金 Au9999",
+      "market": "PM",
+      "data_symbol": "Au9999"
     }
   ]
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -101,6 +102,157 @@ def _pivot_highs(highs: list[float], left: int = 2, right: int = 2) -> list[int]
         if ok:
             idxs.append(i)
     return idxs
+
+
+def _trend_label_from_closes(closes: list[float]) -> str:
+    """与日线主逻辑一致的趋势标签（用于多周期辅图）。"""
+    n = len(closes)
+    if n < 30:
+        return "数据不足"
+    sma20 = _sma(closes, 20)
+    sma60 = _sma(closes, 60)
+    last = closes[-1]
+    trend = "震荡"
+    if sma20 and sma60:
+        if last > sma20 > sma60:
+            trend = "偏多"
+        elif last < sma20 < sma60:
+            trend = "偏空"
+        elif last >= sma20 and last < sma60:
+            trend = "震荡偏空"
+        elif last <= sma20 and last > sma60:
+            trend = "震荡偏多"
+    elif sma20:
+        trend = "偏多" if last > sma20 else "偏空"
+    return trend
+
+
+def _trend_sign(label: str) -> int:
+    if label in ("偏多", "震荡偏多"):
+        return 1
+    if label in ("偏空", "震荡偏空"):
+        return -1
+    return 0
+
+
+def compute_structure_filters_v1(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """波动/流动性过滤：降低极低量、极窄/异常宽 K 线的假结构权重（仅作提示，不替代威科夫）。"""
+    highs = [float(r["high"]) for r in rows if r.get("high") is not None]
+    lows = [float(r["low"]) for r in rows if r.get("low") is not None]
+    vols = [float(r.get("volume", 0.0) or 0.0) for r in rows]
+    n = min(len(highs), len(lows), len(vols))
+    if n < 25:
+        return {"version": "v1", "flags": ["insufficient_data"], "metrics": {}}
+    ranges = [max(0.0, highs[i] - lows[i]) for i in range(n)]
+    last_range = ranges[-1]
+    base_range = _avg(ranges[-21:-1]) if n >= 22 else _avg(ranges[:-1])
+    last_vol = vols[-1]
+    base_vol = _avg(vols[-21:-1]) if n >= 22 else _avg(vols[:-1])
+    vol_ratio = (last_vol / base_vol) if base_vol and base_vol > 0 else None
+    range_ratio = (last_range / base_range) if base_range and base_range > 0 else None
+    flags: list[str] = []
+    if vol_ratio is not None and vol_ratio < 0.25:
+        flags.append("low_liquidity_volume")
+    if range_ratio is not None and range_ratio < 0.35:
+        flags.append("abnormally_narrow_range")
+    if range_ratio is not None and range_ratio > 2.8:
+        flags.append("high_volatility_spike")
+    if not flags:
+        flags.append("normal")
+    return {
+        "version": "v1",
+        "flags": flags,
+        "metrics": {
+            "volume_ratio_vs_prev20": vol_ratio,
+            "range_ratio_vs_prev20": range_ratio,
+        },
+    }
+
+
+def default_time_stop_bars(interval: str) -> int:
+    m = {"1d": 5, "1day": 5, "4h": 12, "1h": 24, "1w": 3, "1wk": 3}
+    return m.get((interval or "1d").lower(), 5)
+
+
+def compute_time_stop_v1(interval: str) -> dict[str, Any]:
+    b = default_time_stop_bars(interval)
+    return {
+        "version": "v1",
+        "max_wait_bars": b,
+        "primary_interval": interval,
+        "rule": (
+            f"123 为待触发/观察时：若超过约 {b} 根 {interval} K 线仍未触发（且价格未明确突破结构），"
+            "视为时间止损/应重评；可与价格止损并行参考。"
+        ),
+    }
+
+
+def time_stop_deadline_utc(*, now_utc: datetime, interval: str, bars: int) -> str:
+    """按主周期粗算「时间止损观察截止」UTC ISO（日历近似，非交易所交易日历）。"""
+    iv = (interval or "1d").lower()
+    if iv in {"1d", "1day"}:
+        dt = now_utc + timedelta(days=int(max(1, bars) * 1.45))
+    elif iv == "4h":
+        dt = now_utc + timedelta(hours=int(max(1, bars) * 4))
+    elif iv == "1h":
+        dt = now_utc + timedelta(hours=int(max(1, bars)))
+    elif iv in {"1w", "1wk"}:
+        dt = now_utc + timedelta(weeks=int(max(1, bars)))
+    else:
+        dt = now_utc + timedelta(days=int(max(1, bars)))
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def infer_median_bar_spacing_days(rows: list[dict[str, Any]]) -> float | None:
+    """根据最近若干根 K 线的时间戳估算中位 bar 间距（天）。"""
+    times: list[datetime] = []
+    for r in rows[-40:]:
+        t = r.get("time")
+        if not t:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        times.append(dt.astimezone(timezone.utc))
+    if len(times) < 4:
+        return None
+    diffs: list[float] = []
+    for i in range(1, len(times)):
+        diffs.append((times[i] - times[i - 1]).total_seconds() / 86400.0)
+    diffs.sort()
+    mid = len(diffs) // 2
+    return diffs[mid] if len(diffs) % 2 else (diffs[mid - 1] + diffs[mid]) / 2.0
+
+
+def compute_mtf_v1(
+    *,
+    primary_trend: str,
+    secondary_rows: list[dict[str, Any]],
+    secondary_interval: str,
+) -> dict[str, Any] | None:
+    """辅周期趋势与主周期是否同向（共振提示）。"""
+    closes = [float(r["close"]) for r in secondary_rows if r.get("close") is not None]
+    if len(closes) < 30:
+        return {
+            "version": "v1",
+            "enabled": False,
+            "secondary_interval": secondary_interval,
+            "reason": "secondary_bars_insufficient",
+        }
+    sec_trend = _trend_label_from_closes(closes)
+    aligned = _trend_sign(primary_trend) != 0 and _trend_sign(primary_trend) == _trend_sign(sec_trend)
+    return {
+        "version": "v1",
+        "enabled": True,
+        "secondary_interval": secondary_interval,
+        "primary_trend": primary_trend,
+        "secondary_trend": sec_trend,
+        "aligned": aligned,
+        "note": "辅周期仅作共振参考；与主周期矛盾时应降权或等待。",
+    }
 
 
 def compute_wyckoff_context(rows: list[dict[str, Any]], trend: str) -> dict[str, Any]:
@@ -299,7 +451,13 @@ def build_wyckoff_123_plan(rows: list[dict[str, Any]], trend: str) -> dict[str, 
     }
 
 
-def compute_ohlc_stats(rows: list[dict[str, Any]], *, interval: str) -> dict[str, Any] | None:
+def compute_ohlc_stats(
+    rows: list[dict[str, Any]],
+    *,
+    interval: str,
+    secondary_rows: list[dict[str, Any]] | None = None,
+    secondary_interval: str | None = None,
+) -> dict[str, Any] | None:
     closes = [float(r["close"]) for r in rows if r.get("close") is not None]
     highs = [float(r["high"]) for r in rows if r.get("high") is not None]
     lows = [float(r["low"]) for r in rows if r.get("low") is not None]
@@ -339,7 +497,28 @@ def compute_ohlc_stats(rows: list[dict[str, Any]], *, interval: str) -> dict[str
         trend = "偏多" if last > sma20 else "偏空"
 
     wyckoff_123 = build_wyckoff_123_plan(rows, trend=trend)
-    return {
+    structure_filters_v1 = compute_structure_filters_v1(rows)
+    time_stop_v1 = compute_time_stop_v1(interval)
+    mtf_v1: dict[str, Any] | None = None
+    if secondary_rows and secondary_interval:
+        spacing = infer_median_bar_spacing_days(secondary_rows)
+        iv = secondary_interval.lower()
+        want_subdaily = iv in {"4h", "1h", "60m", "30m", "15m", "5m", "1m"}
+        if want_subdaily and spacing is not None and spacing > 0.55:
+            mtf_v1 = {
+                "version": "v1",
+                "enabled": False,
+                "requested_interval": secondary_interval,
+                "reason": "secondary_downgraded_to_daily",
+                "median_bar_spacing_days": spacing,
+            }
+        else:
+            mtf_v1 = compute_mtf_v1(
+                primary_trend=trend,
+                secondary_rows=secondary_rows,
+                secondary_interval=secondary_interval,
+            )
+    out: dict[str, Any] = {
         "interval": interval,
         "last": last,
         "sma20": sma20,
@@ -355,7 +534,12 @@ def compute_ohlc_stats(rows: list[dict[str, Any]], *, interval: str) -> dict[str
         "trend": trend,
         "n_bars": n,
         "wyckoff_123_v1": wyckoff_123,
+        "structure_filters_v1": structure_filters_v1,
+        "time_stop_v1": time_stop_v1,
     }
+    if mtf_v1 is not None:
+        out["mtf_v1"] = mtf_v1
+    return out
 
 
 def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
@@ -371,6 +555,9 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: d
     strategy = stats.get("wyckoff_123_v1") or {}
     bg = strategy.get("background") or {}
     selected = strategy.get("selected_setup")
+    sf = stats.get("structure_filters_v1") or {}
+    mtf = stats.get("mtf_v1") or {}
+    tsv = stats.get("time_stop_v1") or {}
 
     def _fmt_pct(x: float | None) -> str:
         return "N/A" if x is None else f"{x:.2f}%"
@@ -420,6 +607,39 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: d
         f"vol_ratio={_fmt_pct(bg.get('volume_ratio') * 100 - 100) if bg.get('volume_ratio') is not None else 'N/A'}，"
         f"spread_ratio={_fmt_pct(bg.get('spread_ratio') * 100 - 100) if bg.get('spread_ratio') is not None else 'N/A'}\n"
     )
+    flags = sf.get("flags") or []
+    mtr = sf.get("metrics") or {}
+    vr = mtr.get("volume_ratio_vs_prev20")
+    rr = mtr.get("range_ratio_vs_prev20")
+    vr_s = "N/A" if vr is None else f"{float(vr):.2f}"
+    rr_s = "N/A" if rr is None else f"{float(rr):.2f}"
+    lines.append(
+        "- **结构过滤（量/振幅 v1）**："
+        f"flags=`{','.join(str(x) for x in flags)}`；"
+        f"量/前20均比={vr_s}；"
+        f"振幅/前20均比={rr_s}\n"
+    )
+    if mtf:
+        if mtf.get("enabled") is False:
+            lines.append(
+                "- **多周期（v1）**：未启用或不可用 — "
+                f"原因 `{mtf.get('reason', 'N/A')}`"
+                + (
+                    f"，请求周期={mtf.get('requested_interval')}"
+                    if mtf.get("requested_interval")
+                    else ""
+                )
+                + "\n"
+            )
+        else:
+            lines.append(
+                "- **多周期（v1）**："
+                f"辅图 {mtf.get('secondary_interval', 'N/A')} 趋势 `{mtf.get('secondary_trend', 'N/A')}`，"
+                f"与主图共振={'是' if mtf.get('aligned') else '否'}；"
+                f"{mtf.get('note', '')}\n"
+            )
+    if tsv:
+        lines.append(f"- **时间止损（v1）**：{tsv.get('rule', '')}\n")
     if selected:
         lines.append(
             f"- **123入场（{selected.get('side', 'N/A')}）**："
@@ -449,6 +669,13 @@ def format_brief_line(asset: dict[str, str], stats: dict[str, Any], research: di
             extra = f"，研报命中 {len(items)}"
             if isinstance(total, int):
                 extra += f"/{total}"
+    mtf = stats.get("mtf_v1") or {}
+    if mtf.get("enabled") is True and mtf.get("aligned") is False:
+        extra += "，多周期未共振"
+    sf = stats.get("structure_filters_v1") or {}
+    fl = sf.get("flags") or []
+    if isinstance(fl, list) and fl != ["normal"] and "insufficient_data" not in fl:
+        extra += f"，结构过滤:{','.join(str(x) for x in fl[:3])}"
     return (
         f"- {name}（{symbol}）: {stats.get('trend', 'N/A')}，"
         f"现价 {_fmt_px(float(stats['last']))}，Fib区 `{stats.get('price_vs_fib_zone', 'unknown')}`{extra}"

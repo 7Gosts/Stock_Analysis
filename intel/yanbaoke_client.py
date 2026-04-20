@@ -7,10 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_SEARCH_SCRIPT = SCRIPT_DIR / "tools" / "yanbaoke" / "scripts" / "search.mjs"
-DEFAULT_DOWNLOAD_SCRIPT = SCRIPT_DIR / "tools" / "yanbaoke" / "scripts" / "download.mjs"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SEARCH_SCRIPT = _REPO_ROOT / "tools" / "yanbaoke" / "scripts" / "search.mjs"
+DEFAULT_DOWNLOAD_SCRIPT = _REPO_ROOT / "tools" / "yanbaoke" / "scripts" / "download.mjs"
 
 
 def _slugify(text: str, *, max_len: int = 80) -> str:
@@ -34,6 +33,8 @@ def run_node_script(script_path: Path, args: list[str], *, timeout_sec: float = 
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout_sec,
         check=False,
     )

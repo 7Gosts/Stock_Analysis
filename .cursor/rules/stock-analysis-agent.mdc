@@ -5,25 +5,29 @@ alwaysApply: true
 
 # Stock Analysis Agent Rules
 
+- 仓库内 **Python 包与文件速查**：`docs/NAMESPACE.md`（`analysis` = 行情/指标/台账，`intel` = 研报客封装）。
+
 - 始终使用简体中文回复。
 - 写作风格：自然、直接、清晰；先结论后依据；避免模板化空话。
-- 股票行情相关请求默认先执行：
-  - `python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output`
+- **首次对话 / 从其他 Agent 入口**：若用户尚未说明 **整体资产规模（可区间）** 与 **风险偏好（至少含单笔最大亏损占权益比例或保守/均衡/进取）**，应先完成简短问答，或请用户确认使用「默认演示画像」并在回复中写明假设；**之后**再跑行情 CLI。同一对话内已给出画像则可沿用。
+- 已建立风险画像且已读 `ai_overview.json` 时：逐标的须给出 **情景化仓位与开单建议**（用 JSON 中 `entry/stop/tp` 与 `triggered`，公式见 `AI_股票对话提示.md` §3.1），并声明为自述参数下的演算，不构成投资建议。
+- 股票行情相关请求默认先执行（在**仓库根目录**；若适用上条「首次对话」，则先画像再执行）：
+  - `python cli/stock_analysis.py --market-brief --report-only --out-dir output`
 - 若用户明确要看**研报线索**、**机构观点**、**行业/板块资金与配置叙事**（不等同于交易所逐笔资金流），在行情命令基础上追加研报客搜索：
   - 多标的默认（用标的名称做关键词）：  
-    `python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output --with-research --research-n 5`
+    `python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5`
   - 单标的且用户给了研报关键词（含板块名/主题词）：  
-    `python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir Stock_Analysis/output --with-research --research-n 5 --research-keyword "<关键词>"`
-  - 说明：研报客输出写入 `Stock_Analysis/output/research/<UTC日期>/`；`full_report.md` / `ai_overview.json` 会附带摘要字段；**搜索不要求 API Key**，下载才需要 `YANBAOKE_API_KEY`（见 `Stock_Analysis/tools/yanbaoke/SKILL.md`）。
-  - 边界：研报客提供的是**研报检索与摘要线索**，不是保证准确的实时“主力资金净流入”数据；若用户要的是交易所级资金流，应明确说明本项目当前不做该数据源。
-- 若用户想看**新的股票**，先更新 `Stock_Analysis/market_config.json`：
+    `python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --with-research --research-n 5 --research-keyword "<关键词>"`
+  - 说明：研报客输出写入 `output/research/<UTC日期>/`；`full_report.md` / `ai_overview.json` 会附带摘要字段；**搜索不要求 API Key**，下载才需要 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
+  - 边界：研报客提供的是**研报检索与摘要线索**，不是保证准确的实时“主力资金净流入”数据；若用户要的是交易所级资金流或**官方板块成分**，应明确说明：资金流与板块结构化数据属 **`market_data/` 预留域**，当前未接则不做编造。
+- 若用户想看**新的股票**，先更新 `config/market_config.json`：
   - 在 `assets` 追加 `symbol` / `name` / `market` / `data_symbol`
   - 需要默认纳入简报时，再把 `symbol` 加入 `default_symbols`
 - 读取产物顺序固定为：
-  1) `ai_brief.md`
-  2) `ai_overview.json`
-  3) `full_report.md`
+  1) `output/<UTC日期>/ai_brief.md`
+  2) `output/<UTC日期>/ai_overview.json`
+  3) `output/<UTC日期>/full_report.md`
 - 输出顺序固定为：先逐标的解读，再跨标的总结。
-- 每个标的解读至少包含：综合倾向、关键位（含 Fib 区间）、触发条件、风险点、免责声明。
+- 每个标的解读至少包含：综合倾向、关键位（含 Fib 区间）、触发条件、风险点、免责声明；**已建立风险画像时**还须包含情景化仓位与开单建议（见 `AI_股票对话提示.md` §3.1）。
 - 合规口径：仅作技术分析与程序化演示，不构成投资建议。
-- 数据源默认 `tickflow`；若用户指定可切换 `akshare` 或 `alltick`。
+- 数据源默认 `tickflow`；若用户指定可切换 `akshare`、`alltick` 或 **`goldapi`**（贵金属，默认内置 appkey；`--symbol` 用配置里贵金属标的如 `AU9999`）。

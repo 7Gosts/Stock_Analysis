@@ -1,4 +1,20 @@
-# AI 股票对话提示（Stock_Analysis）v2 强约束版
+# AI 股票对话提示（Stock_Analysis）v3.1
+
+本文档与仓库目录对齐：`analysis/`（行情与指标内核）、`intel/`（研报情报）、`market_data/`（预留板块/金融数据源）、`cli/`（编排入口）、`config/`（标的配置）。**速查表**：见仓库根目录 `docs/NAMESPACE.md`。
+
+## 0.1) 首次对话 / 从其他 Agent 入口进来（强制顺序）
+
+适用：**本轮对话尚未建立**用户的**风险画像**（或用户明确要求「按默认演示画像」）。
+
+1. **先问清（可二选一精度）**  
+   - **整体资产规模**：可接受「区间」或「数量级」（如 30～50 万、约 100 万），不必强迫精确到个位。  
+   - **风险偏好**：至少包含——**单笔可承受亏损占权益的比例上限**（如 ≤0.5% / ≤1% / ≤2%）或定性三档（保守/均衡/进取）并映射到建议比例区间；若有 **单日最大亏损**、**是否使用杠杆/两融/衍生品** 一并记录更好。  
+   - 若用户拒绝披露：使用 **「默认演示画像」**（在回复中写明假设：例如权益 100 万、单笔风险 1%、不做杠杆），并再次提示真实决策应以本人资金与合规渠道为准。
+
+2. **再跑行情**  
+   - 完成上一步（或用户确认沿用上次在本对话已给出的画像）后，再执行下文「用户意图识别」里的 CLI 与读文件流程。
+
+3. **再结合画像输出「个性化仓位管理 + 开单建议」**（见 §3.1），且必须与 `ai_overview.json` 中的 **entry/stop/tp** 一致，禁止脱离结构乱编手数。
 
 ## 0) 写作与表达（最高优先级）
 
@@ -12,39 +28,42 @@
 
 若用户额外提到：**研报** / **机构观点** / **行业或板块资金与配置叙事**（研报层面的“资金/配置/加仓减仓”表述），则视为需要启用 **研报客（yanbaoke）搜索**（不等同于交易所逐笔资金流）。
 
+若用户要的是 **交易所/软件里的概念板块官方成分股、板块资金流** 等结构化数据，属于 **`market_data/` 预留域**；当前未接该类数据源时须如实说明，可改用研报关键词检索作**线索**（见 `intel/yanbaoke_client.py`），不可冒充官方板块数据。
+
 你必须执行：
 
+0. **风险画像**：若属 **§0.1 首次对话** 场景，先完成问答（或默认演示画像）后再执行下列 CLI；同一对话内已建立画像则可跳过。  
 1. 先确认本次标的列表。
-2. 若用户提到新股票（配置里没有），先更新 `Stock_Analysis/market_config.json`：
+2. 若用户提到新股票（配置里没有），先更新 **`config/market_config.json`**：
    - 在 `assets` 增加 `symbol` / `name` / `market` / `data_symbol`
    - 若要纳入默认简报，再把 `symbol` 加入 `default_symbols`
-3. 运行命令（二选一）：
+3. 在**仓库根目录**运行命令（二选一）：
 
 ```bash
 # A) 仅行情结构（默认）
-python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output
+python cli/stock_analysis.py --market-brief --report-only --out-dir output
 
 # B) 行情结构 + 研报线索（需要 Node.js；搜索不要求 API Key）
-python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output --with-research --research-n 5
+python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5
 ```
 
 单标的且用户给了板块/主题关键词时：
 
 ```bash
-python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir Stock_Analysis/output --with-research --research-n 5 --research-keyword "<关键词>"
+python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --with-research --research-n 5 --research-keyword "<关键词>"
 ```
 
 ## 2) 读取顺序（固定，不可颠倒）
 
 每次解读都按以下顺序读取：
 
-1. `Stock_Analysis/output/<UTC日期>/ai_brief.md`
-2. `Stock_Analysis/output/<UTC日期>/ai_overview.json`
-3. `Stock_Analysis/output/<UTC日期>/full_report.md`
+1. `output/<UTC日期>/ai_brief.md`
+2. `output/<UTC日期>/ai_overview.json`
+3. `output/<UTC日期>/full_report.md`
 
 若本轮启用了研报搜索，再补充读取（用于核对标题/链接/命中条数）：
 
-4. `Stock_Analysis/output/research/<UTC日期>/*_research.json`（优先读与本次关键词对应的文件）
+4. `output/research/<UTC日期>/*_research.json`（优先读与本次关键词对应的文件）
 
 补充要求：
 
@@ -66,6 +85,19 @@ python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-d
 若本轮包含研报搜索结果，还必须额外给一小段（可并入“风险点/触发条件”附近，但不要省略）：
 
 - **研报线索**：用 2-4 条要点概括“机构在说什么/资金与配置叙事”，并明确这是研报文本线索，不是交易所官方资金流统计。
+
+### 3.1) 个性化仓位管理 + 开单建议（在已建立风险画像时强制）
+
+在 **§0.1 已完成**（或用户明确采用默认演示画像）且已读取 `ai_overview.json` 后，**逐标的**须增加一小节（建议接在第 3 点「触发条件」之后），标题：**「情景化仓位（基于您自述参数）」**，内容至少包括：
+
+- **沿用假设**：一句话复述本轮使用的权益口径、单笔风险上限%、是否假设现货。  
+- **与结构挂钩**：仅针对 **JSON 中已有 123 计划字段** 的标的，使用其中的 `entry`、`stop`、`tp1`/`tp2` 与 `triggered`；若 `neutral` 或无一致结构，写「不建议强行开仓，仅观察/降仓」，可只给 **若参与则资金上限比例**，不给具体手数。  
+- **多头现货示例公式（说明用）**：  
+  - 单笔允许亏损金额 \(R_{\text{money}} = \text{权益} \times \text{单笔风险比例}\)  
+  - 每股（每单位）价格风险 \(R_{\text{price}} = |\text{entry} - \text{stop}|\)（来自 JSON，禁止臆造）  
+  - 理论数量 \(= \lfloor R_{\text{money}} / R_{\text{price}} \rfloor\)，再受 **单标的占用资金上限**（如权益的 10%～25%，随保守/均衡/进取调整）约束。  
+- **执行提示**：`triggered` / 待触发 / 仅观察 分别对应「结构已触发后的减仓/风控要点」「挂单/条件单等待」「不参与或仅试错仓」；点明 **最小交易单位、T+1、佣金与滑点** 会放大实际风险。  
+- **再次声明**：本节为根据用户**自述**参数与技术结构的**算术演示**，非投资顾问结论，不构成投资建议。
 
 ## 4) 威科夫 + 123 解读约束（强制）
 
@@ -97,9 +129,9 @@ python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-d
 
 若存在以下文件，先简短回顾再进入行情解读：
 
-- `Stock_Analysis/output/trade_journal.jsonl`
-- `Stock_Analysis/output/trade_journal_stats_latest.md`
-- `Stock_Analysis/output/trade_journal_stats_latest.json`
+- `output/trade_journal.jsonl`
+- `output/trade_journal_stats_latest.md`
+- `output/trade_journal_stats_latest.json`
 
 回顾内容至少包含：近7天/近30天候选单数量、命中率、止盈率、止损率。
 
@@ -108,5 +140,5 @@ python3 Stock_Analysis/stock_analysis.py --symbol <SYMBOL> --report-only --out-d
 须明确：
 
 - 数据来自项目配置数据源（默认 `tickflow`）。
-- 文中价位与策略为技术情景推演。
+- 文中价位与策略为技术情景推演；**仓位与手数**为基于用户**自述**资金与风险参数的**演示演算**，不代表适合该用户的真实账户。
 - 仅作技术分析与程序化演示，不构成投资建议。

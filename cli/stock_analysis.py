@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-股票 K 线分析 CLI（A股 / 美股）。
+市场报告 CLI：编排 `analysis`（拉数 + 指标 + 台账）与可选 `intel`（研报客）。
 
-示例:
-  python3 Stock_Analysis/stock_analysis.py --market-brief
-  python3 Stock_Analysis/stock_analysis.py --symbol AAPL --interval 1d --limit 180
+示例（在仓库根目录执行）:
+  python cli/stock_analysis.py --market-brief
+  python cli/stock_analysis.py --symbol AAPL --interval 1d --limit 180
 """
 
 from __future__ import annotations
@@ -12,16 +12,25 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from analysis_engine import compute_ohlc_stats, format_brief_line, format_report_card
-from data_providers import fetch_ohlcv
-from trade_journal_stats import write_latest_stats
-from yanbaoke_client import write_research_bundle
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from analysis.kline_metrics import (
+    compute_ohlc_stats,
+    format_brief_line,
+    format_report_card,
+    time_stop_deadline_utc,
+)
+from analysis.price_feeds import fetch_ohlcv
+from analysis.ledger_stats import write_latest_stats
+from intel.yanbaoke_client import write_research_bundle
 
 
 def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, str]]]:
@@ -65,6 +74,35 @@ def _safe_float(v: Any) -> float | None:
     if isinstance(v, (int, float)):
         return float(v)
     return None
+
+
+def resolve_mtf_interval_effective(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """返回 (辅周期, 跳过原因)。auto：1d 主图按数据源选辅周期。"""
+    if getattr(args, "no_mtf", False):
+        return None, None
+    raw = str(getattr(args, "mtf_interval", "auto") or "auto").strip()
+    low = raw.lower()
+    if low in {"none", "off", "0", "false"}:
+        return None, None
+    if low not in {"auto", ""}:
+        return raw, None
+
+    main = str(args.interval).strip().lower()
+    prov = str(args.provider).strip().lower()
+    if prov in {"goldapi", "gold_api", "gold-api"}:
+        return None, "goldapi_no_mtf"
+    if main not in {"1d", "1day"}:
+        return None, "auto_only_for_daily_main"
+
+    if prov == "tickflow":
+        if os.getenv("TICKFLOW_API_KEY", "").strip():
+            return "4h", None
+        return "1w", None
+    if prov == "akshare":
+        return "1wk", None
+    if prov == "alltick":
+        return "60m", None
+    return None, "provider_no_auto_mtf"
 
 
 def _valid_until_utc(now_utc: datetime, interval: str) -> datetime:
@@ -119,6 +157,35 @@ def build_trade_journal_entry(
         ]
     )
     idea_id = hashlib.sha1(stable_key.encode("utf-8")).hexdigest()[:12]
+    ts_v = stats.get("time_stop_v1") or {}
+    bars = int(ts_v.get("max_wait_bars") or 5)
+    ddl_iso = time_stop_deadline_utc(now_utc=now_utc, interval=interval, bars=bars)
+    ddl_dt = datetime.fromisoformat(ddl_iso.replace("Z", "+00:00"))
+    base_valid = _valid_until_utc(now_utc, interval)
+    status = "filled" if triggered else ("pending" if aligned else "watch")
+    valid_until = max(base_valid, ddl_dt) if status in {"pending", "watch"} else base_valid
+    mtf = stats.get("mtf_v1") or {}
+    mtf_aligned: bool | None = mtf.get("aligned") if mtf.get("enabled") is True else None
+    sf = stats.get("structure_filters_v1") or {}
+    structure_flags = sf.get("flags") if isinstance(sf.get("flags"), list) else []
+    wyckoff_bias = str(bg.get("bias") or "neutral")
+    lifecycle_v1: dict[str, Any] = {
+        "version": "v1",
+        "time_stop_rule": str(ts_v.get("rule") or ""),
+        "time_stop_deadline_utc": ddl_iso,
+        "invalidation_hints": [
+            "价格有效突破/跌破结构止损位",
+            "超过 time_stop_deadline_utc 仍未触发或结构被推翻，应重评",
+            "结构过滤 flags 含 low_liquidity_volume / abnormally_narrow_range 时降权",
+        ],
+    }
+    reason_tail = ""
+    if mtf.get("enabled") is True:
+        reason_tail += f"；MTF共振={'是' if mtf_aligned else '否'}"
+    elif mtf.get("enabled") is False and mtf.get("reason"):
+        reason_tail += f"；MTF不可用({mtf.get('reason')})"
+    if structure_flags and structure_flags != ["normal"]:
+        reason_tail += f"；结构过滤={','.join(str(x) for x in structure_flags[:4])}"
     return {
         "idea_id": idea_id,
         "created_at_utc": now_utc.isoformat(),
@@ -141,9 +208,10 @@ def build_trade_journal_entry(
             f"威科夫背景={bg.get('bias', 'neutral')}；"
             f"123状态={'已触发' if triggered else '待触发'}；"
             f"{'方向一致' if aligned else '方向观察'}"
+            f"{reason_tail}"
         ),
-        "valid_until_utc": _valid_until_utc(now_utc, interval).isoformat(),
-        "status": "filled" if triggered else ("pending" if aligned else "watch"),
+        "valid_until_utc": valid_until.isoformat(),
+        "status": status,
         "updated_at_utc": now_utc.isoformat(),
         "filled_at_utc": now_utc.isoformat() if triggered else None,
         "fill_price": round(fill_price, 6) if triggered else None,
@@ -152,6 +220,11 @@ def build_trade_journal_entry(
         "closed_price": None,
         "realized_pnl_pct": None,
         "risk_note": "仅技术分析演示，需结合风控独立决策。",
+        "wyckoff_bias": wyckoff_bias,
+        "mtf_aligned": mtf_aligned,
+        "structure_filter_flags": structure_flags,
+        "time_stop_deadline_utc": ddl_iso,
+        "lifecycle_v1": lifecycle_v1,
     }
 
 
@@ -166,17 +239,21 @@ def append_trade_journal(path: Path, entries: list[dict[str, Any]]) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="股票 K 线分析：报告 + JSON")
-    p.add_argument("--provider", default="tickflow", help="数据源，默认 tickflow")
+    p.add_argument(
+        "--provider",
+        default="tickflow",
+        help="数据源：tickflow（默认）/ akshare / alltick / goldapi（贵金属，默认可用内置 Gold API key）",
+    )
     p.add_argument(
         "--config",
-        default=str(SCRIPT_DIR / "market_config.json"),
+        default=str(_REPO_ROOT / "config" / "market_config.json"),
         help="市场配置文件路径",
     )
     p.add_argument("--market-brief", action="store_true", help="按配置 default_symbols 批量分析")
     p.add_argument("--symbol", default=None, help="单标的 symbol（如 AAPL / 600519.SH）")
     p.add_argument("--interval", default="1d", help="K线周期，默认 1d")
     p.add_argument("--limit", type=int, default=180, help="K线根数，默认 180")
-    p.add_argument("--out-dir", default=str(SCRIPT_DIR / "output"), help="输出根目录")
+    p.add_argument("--out-dir", default=str(_REPO_ROOT / "output"), help="输出根目录")
     p.add_argument("--report-only", action="store_true", help="兼容旧参数；当前默认仅输出报告")
     p.add_argument("--with-research", action="store_true", help="启用研报客（yanbaoke）搜索并写入 output/research/")
     p.add_argument("--research-n", type=int, default=3, help="研报搜索结果条数，默认 3（最大 500）")
@@ -186,6 +263,12 @@ def main() -> int:
         default=None,
         help="研报搜索关键词（可选；未指定则默认用标的名称）",
     )
+    p.add_argument(
+        "--mtf-interval",
+        default="auto",
+        help="多周期辅图：auto（默认按数据源自动）/ 如 4h 1wk 60m；配合 --no-mtf 关闭",
+    )
+    p.add_argument("--no-mtf", action="store_true", help="关闭多周期辅图拉取与共振字段")
     args = p.parse_args()
 
     if not args.market_brief and not args.symbol:
@@ -219,6 +302,8 @@ def main() -> int:
     overview: list[dict[str, Any]] = []
     journal_candidates: list[dict[str, Any]] = []
 
+    mtf_interval_effective, mtf_skip_reason = resolve_mtf_interval_effective(args)
+
     for symbol in selected:
         asset = assets_map[symbol]
         try:
@@ -236,7 +321,31 @@ def main() -> int:
             print(f"[跳过] {symbol} 数据不足（<30根）", file=sys.stderr)
             continue
 
-        stats = compute_ohlc_stats(rows, interval=args.interval)
+        mtf_rows: list[dict[str, Any]] | None = None
+        mtf_note: str | None = None if mtf_interval_effective else mtf_skip_reason
+        if mtf_interval_effective:
+            try:
+                mtf_rows = fetch_ohlcv(
+                    provider=args.provider,
+                    ticker=asset["data_symbol"],
+                    market=asset["market"],
+                    interval=mtf_interval_effective,
+                    limit=min(int(args.limit), 400),
+                )
+            except Exception as e:
+                mtf_rows = None
+                mtf_note = f"fetch_failed:{e}"
+            if not mtf_rows or len(mtf_rows) < 30:
+                mtf_rows = None
+                suf = "secondary_insufficient"
+                mtf_note = f"{mtf_note};{suf}" if mtf_note else suf
+
+        stats = compute_ohlc_stats(
+            rows,
+            interval=args.interval,
+            secondary_rows=mtf_rows,
+            secondary_interval=mtf_interval_effective if mtf_rows else None,
+        )
         if not stats:
             print(f"[跳过] {symbol} 指标计算失败", file=sys.stderr)
             continue
@@ -264,6 +373,9 @@ def main() -> int:
                 "market": asset["market"],
                 "provider": args.provider,
                 "interval": args.interval,
+                "mtf_interval_requested": str(getattr(args, "mtf_interval", "") or ""),
+                "mtf_interval_effective": mtf_interval_effective,
+                "mtf_note": mtf_note,
                 "stats": stats,
                 "research": research,
             }
@@ -297,6 +409,7 @@ def main() -> int:
                     "generated_at_utc": now_utc.isoformat(),
                     "provider": args.provider,
                     "interval": args.interval,
+                    "mtf_interval_effective": mtf_interval_effective,
                     "items": overview,
                 },
                 ensure_ascii=False,
