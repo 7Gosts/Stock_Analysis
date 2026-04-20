@@ -1,0 +1,45 @@
+{
+  "default_symbols": [
+    "NVDA",
+    "AAPL",
+    "TSLA"
+  ],
+  "assets": [
+    {
+      "symbol": "600519.SH",
+      "name": "贵州茅台",
+      "market": "CN",
+      "data_symbol": "600519.SH"
+    },
+    {
+      "symbol": "000001.SZ",
+      "name": "平安银行",
+      "market": "CN",
+      "data_symbol": "000001.SZ"
+    },
+    {
+      "symbol": "AAPL",
+      "name": "苹果",
+      "market": "US",
+      "data_symbol": "AAPL"
+    },
+    {
+      "symbol": "NVDA",
+      "name": "英伟达",
+      "market": "US",
+      "data_symbol": "NVDA"
+    },
+    {
+      "symbol": "TSLA",
+      "name": "特斯拉",
+      "market": "US",
+      "data_symbol": "TSLA"
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "market": "US",
+      "data_symbol": "MSFT"
+    }
+  ]
+}

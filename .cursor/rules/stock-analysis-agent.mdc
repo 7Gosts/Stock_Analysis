@@ -1,0 +1,22 @@
+---
+description: Stock_Analysis 项目 Agent 执行规则
+alwaysApply: true
+---
+
+# Stock Analysis Agent Rules
+
+- 始终使用简体中文回复。
+- 写作风格：自然、直接、清晰；先结论后依据；避免模板化空话。
+- 股票行情相关请求默认先执行：
+  - `python3 Stock_Analysis/stock_analysis.py --market-brief --report-only --out-dir Stock_Analysis/output`
+- 若用户想看**新的股票**，先更新 `Stock_Analysis/market_config.json`：
+  - 在 `assets` 追加 `symbol` / `name` / `market` / `data_symbol`
+  - 需要默认纳入简报时，再把 `symbol` 加入 `default_symbols`
+- 读取产物顺序固定为：
+  1) `ai_brief.md`
+  2) `ai_overview.json`
+  3) `full_report.md`
+- 输出顺序固定为：先逐标的解读，再跨标的总结。
+- 每个标的解读至少包含：综合倾向、关键位（含 Fib 区间）、触发条件、风险点、免责声明。
+- 合规口径：仅作技术分析与程序化演示，不构成投资建议。
+- 数据源默认 `tickflow`；若用户指定可切换 `akshare` 或 `alltick`。
