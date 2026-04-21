@@ -48,7 +48,7 @@
 
 | 路径 | 职责 |
 |------|------|
-| `config/market_config.json` | 标的列表、`default_symbols`、`market` / `data_symbol` |
+| `config/market_config.json` | 标的列表、`default_symbols`、`market` / `data_symbol`；可选 `tags`（字符串数组，用于报告/总览/台账） |
 | `tools/yanbaoke/scripts/search.mjs` | 研报客搜索（无 Key 可搜） |
 | `tools/yanbaoke/scripts/download.mjs` | 研报下载（需 Key） |
 | `tools/yanbaoke/SKILL.md` | 研报客技能说明 |

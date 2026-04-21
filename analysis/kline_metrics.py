@@ -542,10 +542,16 @@ def compute_ohlc_stats(
     return out
 
 
-def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
+def format_report_card(asset: dict[str, Any], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
     symbol = asset["symbol"]
     name = asset.get("name") or symbol
     market = asset.get("market") or "UNK"
+    tag_line = ""
+    raw_tags = asset.get("tags")
+    if isinstance(raw_tags, list):
+        tag_parts = [str(t).strip() for t in raw_tags if str(t).strip()]
+        if tag_parts:
+            tag_line = f"- **标签**：{'、'.join(tag_parts)}\n"
     last = _fmt_px(float(stats["last"]))
     ret1 = stats.get("ret1_pct")
     ret5 = stats.get("ret5_pct")
@@ -564,6 +570,8 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: d
 
     lines: list[str] = []
     lines.append(f"## {name}（{symbol}｜{market}）\n")
+    if tag_line:
+        lines.append(tag_line)
     lines.append(f"- **综合倾向**：{stats.get('trend', 'N/A')}\n")
     lines.append(
         f"- **现价**：{last}；1根涨跌：{_fmt_pct(ret1)}；5根涨跌：{_fmt_pct(ret5)}\n"
@@ -658,9 +666,15 @@ def format_report_card(asset: dict[str, str], stats: dict[str, Any], research: d
     return "".join(lines) + "\n"
 
 
-def format_brief_line(asset: dict[str, str], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
+def format_brief_line(asset: dict[str, Any], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
     symbol = asset["symbol"]
     name = asset.get("name") or symbol
+    tag_extra = ""
+    raw_tags = asset.get("tags")
+    if isinstance(raw_tags, list):
+        tag_parts = [str(t).strip() for t in raw_tags if str(t).strip()]
+        if tag_parts:
+            tag_extra = f"，标签「{'、'.join(tag_parts)}」"
     extra = ""
     if research and isinstance(research, dict):
         items = research.get("items") or []
@@ -677,6 +691,6 @@ def format_brief_line(asset: dict[str, str], stats: dict[str, Any], research: di
     if isinstance(fl, list) and fl != ["normal"] and "insufficient_data" not in fl:
         extra += f"，结构过滤:{','.join(str(x) for x in fl[:3])}"
     return (
-        f"- {name}（{symbol}）: {stats.get('trend', 'N/A')}，"
+        f"- {name}（{symbol}）{tag_extra}: {stats.get('trend', 'N/A')}，"
         f"现价 {_fmt_px(float(stats['last']))}，Fib区 `{stats.get('price_vs_fib_zone', 'unknown')}`{extra}"
     )

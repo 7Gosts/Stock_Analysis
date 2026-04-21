@@ -18,6 +18,13 @@
       "data_symbol": "000001.SZ"
     },
     {
+      "symbol": "002050.SZ",
+      "name": "三花智控",
+      "market": "CN",
+      "data_symbol": "002050.SZ",
+      "tags": ["液冷", "数据中心热管理", "汽车热管理"]
+    },
+    {
       "symbol": "AAPL",
       "name": "苹果",
       "market": "US",
@@ -45,7 +52,8 @@
       "symbol": "AU9999",
       "name": "上海金 Au9999",
       "market": "PM",
-      "data_symbol": "Au9999"
+      "data_symbol": "Au9999",
+      "tags": ["贵金属", "黄金"]
     }
   ]
 }

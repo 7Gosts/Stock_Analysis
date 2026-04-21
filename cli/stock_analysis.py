@@ -33,13 +33,27 @@ from analysis.ledger_stats import write_latest_stats
 from intel.yanbaoke_client import write_research_bundle
 
 
-def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, str]]]:
+def _normalize_asset_tags(raw: Any) -> list[str]:
+    """从配置项解析标签：支持字符串或字符串数组，去空、去首尾空白。"""
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    if isinstance(raw, list):
+        out: list[str] = []
+        for x in raw:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+    return []
+
+
+def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, Any]]]:
     if not path.is_file():
         raise FileNotFoundError(f"配置文件不存在: {path}")
     obj = json.loads(path.read_text(encoding="utf-8"))
     defaults_raw = obj.get("default_symbols") or []
     assets_raw = obj.get("assets") or []
-    assets_map: dict[str, dict[str, str]] = {}
+    assets_map: dict[str, dict[str, Any]] = {}
     for it in assets_raw:
         if not isinstance(it, dict):
             continue
@@ -47,12 +61,16 @@ def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, str]]
         ticker = str(it.get("data_symbol") or it.get("ak_symbol") or it.get("yf_ticker") or "").strip()
         if not symbol or not ticker:
             continue
-        assets_map[symbol.upper()] = {
+        row: dict[str, Any] = {
             "symbol": symbol.upper(),
             "name": str(it.get("name") or symbol.upper()),
             "market": str(it.get("market") or "UNK").upper(),
             "data_symbol": ticker,
         }
+        tags = _normalize_asset_tags(it.get("tags"))
+        if tags:
+            row["tags"] = tags
+        assets_map[symbol.upper()] = row
     defaults: list[str] = []
     for x in defaults_raw:
         sx = str(x).strip().upper()
@@ -117,7 +135,7 @@ def _valid_until_utc(now_utc: datetime, interval: str) -> datetime:
 def build_trade_journal_entry(
     *,
     now_utc: datetime,
-    asset: dict[str, str],
+    asset: dict[str, Any],
     provider: str,
     interval: str,
     stats: dict[str, Any],
@@ -186,7 +204,11 @@ def build_trade_journal_entry(
         reason_tail += f"；MTF不可用({mtf.get('reason')})"
     if structure_flags and structure_flags != ["normal"]:
         reason_tail += f"；结构过滤={','.join(str(x) for x in structure_flags[:4])}"
-    return {
+    tags = asset.get("tags")
+    if not isinstance(tags, list):
+        tags = []
+    tags = [str(t).strip() for t in tags if str(t).strip()]
+    entry_out: dict[str, Any] = {
         "idea_id": idea_id,
         "created_at_utc": now_utc.isoformat(),
         "symbol": asset["symbol"],
@@ -226,6 +248,9 @@ def build_trade_journal_entry(
         "time_stop_deadline_utc": ddl_iso,
         "lifecycle_v1": lifecycle_v1,
     }
+    if tags:
+        entry_out["tags"] = tags
+    return entry_out
 
 
 def append_trade_journal(path: Path, entries: list[dict[str, Any]]) -> None:
@@ -366,11 +391,15 @@ def main() -> int:
 
         cards.append(format_report_card(asset, stats, research=research))
         briefs.append(format_brief_line(asset, stats, research=research))
+        raw_tags = asset.get("tags")
+        item_tags = raw_tags if isinstance(raw_tags, list) else []
+        item_tags = [str(t).strip() for t in item_tags if str(t).strip()]
         overview.append(
             {
                 "symbol": asset["symbol"],
                 "name": asset["name"],
                 "market": asset["market"],
+                "tags": item_tags,
                 "provider": args.provider,
                 "interval": args.interval,
                 "mtf_interval_requested": str(getattr(args, "mtf_interval", "") or ""),

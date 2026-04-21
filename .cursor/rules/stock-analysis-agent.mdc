@@ -20,6 +20,11 @@ alwaysApply: true
     `python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --with-research --research-n 5 --research-keyword "<关键词>"`
   - 说明：研报客输出写入 `output/research/<UTC日期>/`；`full_report.md` / `ai_overview.json` 会附带摘要字段；**搜索不要求 API Key**，下载才需要 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
   - 边界：研报客提供的是**研报检索与摘要线索**，不是保证准确的实时“主力资金净流入”数据；若用户要的是交易所级资金流或**官方板块成分**，应明确说明：资金流与板块结构化数据属 **`market_data/` 预留域**，当前未接则不做编造。
+- **板块 / 概念 / 行业名单类问题（强制研报检索）**：当用户询问「某板块或概念有哪些股 / 成分 / 龙头 / 标的」等——即使主要诉求是成分名单——在说明**官方板块成分表仍属 `market_data/` 未接、不得编造**的前提下，**仍必须主动调用研报客**查一轮叙事线索（搜索不要求 API Key）。**不要求先有风险画像**即可执行本检索。
+  - **仅关键词、不拉 K 线**（推荐）：在仓库根目录执行  
+    `python cli/yb_search.py --keyword "<用户所述板块或概念名>" --n 5`  
+    产物在 `output/research/<UTC日期>/`；读取对应 `*_research.md` / `*_research.json` 后，用 2～4 条要点概括机构在说什么，并再次声明这不是官方成分股。
+  - **若同一轮还要跑 `stock_analysis.py`**：在行情命令上加 `--with-research`，并用 `--research-keyword` 与板块/主题词对齐。
 - 若用户想看**新的股票**，先更新 `config/market_config.json`：
   - 在 `assets` 追加 `symbol` / `name` / `market` / `data_symbol`
   - 需要默认纳入简报时，再把 `symbol` 加入 `default_symbols`
