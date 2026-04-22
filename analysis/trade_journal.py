@@ -18,8 +18,8 @@ def parse_iso_utc(ts: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def to_iso_utc(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+def to_iso_local(dt: datetime) -> str:
+    return dt.astimezone().isoformat()
 
 
 def load_journal(path: Path) -> list[dict[str, Any]]:
@@ -114,7 +114,7 @@ def update_idea_with_rows(idea: dict[str, Any], rows: list[dict[str, Any]], now_
                 continue
             if low <= entry_high and high >= entry_low:
                 idea["status"] = "filled"
-                idea["filled_at_utc"] = to_iso_utc(t)
+                idea["filled_at_utc"] = to_iso_local(t)
                 idea["fill_price"] = round(entry_mid, 6)
                 idea["exit_status"] = None
                 filled_at = t
@@ -124,12 +124,12 @@ def update_idea_with_rows(idea: dict[str, Any], rows: list[dict[str, Any]], now_
         if status in {"watch", "pending"} and now_utc > valid_until:
             idea["status"] = "expired"
             idea["exit_status"] = "time_expired"
-            idea["updated_at_utc"] = to_iso_utc(now_utc)
+            idea["updated_at_utc"] = to_iso_local(now_utc)
             return True
 
     if status != "filled":
         if changed:
-            idea["updated_at_utc"] = to_iso_utc(now_utc)
+            idea["updated_at_utc"] = to_iso_local(now_utc)
         return changed
 
     fill_price = float(idea.get("fill_price") or entry_mid)
@@ -151,7 +151,7 @@ def update_idea_with_rows(idea: dict[str, Any], rows: list[dict[str, Any]], now_
                 pnl_pct = -pnl_pct
             idea["status"] = "closed"
             idea["exit_status"] = "sl"
-            idea["closed_at_utc"] = to_iso_utc(t)
+            idea["closed_at_utc"] = to_iso_local(t)
             idea["closed_price"] = round(stop_px, 6)
             idea["realized_pnl_pct"] = round(pnl_pct, 3)
             changed = True
@@ -162,7 +162,7 @@ def update_idea_with_rows(idea: dict[str, Any], rows: list[dict[str, Any]], now_
                 pnl_pct = -pnl_pct
             idea["status"] = "closed"
             idea["exit_status"] = "tp"
-            idea["closed_at_utc"] = to_iso_utc(t)
+            idea["closed_at_utc"] = to_iso_local(t)
             idea["closed_price"] = round(tp1, 6)
             idea["realized_pnl_pct"] = round(pnl_pct, 3)
             changed = True
@@ -178,5 +178,5 @@ def update_idea_with_rows(idea: dict[str, Any], rows: list[dict[str, Any]], now_
         changed = True
 
     if changed:
-        idea["updated_at_utc"] = to_iso_utc(now_utc)
+        idea["updated_at_utc"] = to_iso_local(now_utc)
     return changed

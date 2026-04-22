@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -82,13 +83,55 @@ def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, Any]]
     return defaults, assets_map
 
 
-def _utc_day(now_utc: datetime) -> str:
-    return now_utc.strftime("%Y-%m-%d")
+def _local_day(now_local: datetime) -> str:
+    return now_local.strftime("%Y-%m-%d")
+
+
+def _fmt_local_second(now_local: datetime) -> str:
+    return now_local.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_local_iso(dt: datetime) -> str:
+    return dt.astimezone().isoformat()
 
 
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _upsert_prepend_text(path: Path, content: str, *, sep: str = "\n\n---\n\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(content, encoding="utf-8")
+        return
+    old = path.read_text(encoding="utf-8")
+    merged = content + (sep + old if old.strip() else "")
+    path.write_text(merged, encoding="utf-8")
+
+
+def _write_overview_latest(path: Path, payload: dict[str, Any]) -> None:
+    """ai_overview.json 仅保留本次最新快照，不保留 _history。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload.pop("_history", None)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_LEGACY_REPORT_TS = re.compile(r"^(full_report|ai_brief|ai_overview)_\d{6,8}(\.json|\.md)$")
+
+
+def _prune_legacy_timestamped_reports(session_dir: Path) -> None:
+    """清理历史时间戳文件，确保同日仅保留主文件。"""
+    try:
+        files = list(session_dir.iterdir())
+    except OSError:
+        return
+    for p in files:
+        if p.is_file() and _LEGACY_REPORT_TS.match(p.name):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def _safe_float(v: Any) -> float | None:
@@ -189,9 +232,12 @@ def build_trade_journal_entry(
     bars = int(ts_v.get("max_wait_bars") or 5)
     ddl_iso = time_stop_deadline_utc(now_utc=now_utc, interval=interval, bars=bars)
     ddl_dt = datetime.fromisoformat(ddl_iso.replace("Z", "+00:00"))
+    ddl_local_iso = _to_local_iso(ddl_dt)
     base_valid = _valid_until_utc(now_utc, interval)
     status = "filled" if triggered else ("pending" if aligned else "watch")
     valid_until = max(base_valid, ddl_dt) if status in {"pending", "watch"} else base_valid
+    valid_until_local_iso = _to_local_iso(valid_until)
+    now_local_iso = _to_local_iso(now_utc)
     mtf = stats.get("mtf_v1") or {}
     mtf_aligned: bool | None = mtf.get("aligned") if mtf.get("enabled") is True else None
     sf = stats.get("structure_filters_v1") or {}
@@ -200,7 +246,7 @@ def build_trade_journal_entry(
     lifecycle_v1: dict[str, Any] = {
         "version": "v1",
         "time_stop_rule": str(ts_v.get("rule") or ""),
-        "time_stop_deadline_utc": ddl_iso,
+        "time_stop_deadline_utc": ddl_local_iso,
         "invalidation_hints": [
             "价格有效突破/跌破结构止损位",
             "超过 time_stop_deadline_utc 仍未触发或结构被推翻，应重评",
@@ -220,7 +266,7 @@ def build_trade_journal_entry(
     tags = [str(t).strip() for t in tags if str(t).strip()]
     entry_out: dict[str, Any] = {
         "idea_id": idea_id,
-        "created_at_utc": now_utc.isoformat(),
+        "created_at_utc": now_local_iso,
         "symbol": asset["symbol"],
         "asset": asset.get("name") or asset["symbol"],
         "market": asset.get("market") or "UNK",
@@ -244,10 +290,10 @@ def build_trade_journal_entry(
             f"{'方向一致' if aligned else '方向观察'}"
             f"{reason_tail}"
         ),
-        "valid_until_utc": valid_until.isoformat(),
+        "valid_until_utc": valid_until_local_iso,
         "status": status,
-        "updated_at_utc": now_utc.isoformat(),
-        "filled_at_utc": now_utc.isoformat() if triggered else None,
+        "updated_at_utc": now_local_iso,
+        "filled_at_utc": now_local_iso if triggered else None,
         "fill_price": round(fill_price, 6) if triggered else None,
         "exit_status": None,
         "closed_at_utc": None,
@@ -257,7 +303,7 @@ def build_trade_journal_entry(
         "wyckoff_bias": wyckoff_bias,
         "mtf_aligned": mtf_aligned,
         "structure_filter_flags": structure_flags,
-        "time_stop_deadline_utc": ddl_iso,
+        "time_stop_deadline_utc": ddl_local_iso,
         "lifecycle_v1": lifecycle_v1,
     }
     if tags:
@@ -336,10 +382,11 @@ def main() -> int:
         return 2
 
     now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone()
     out_base = Path(args.out_dir).resolve()
-    session_dir = out_base / _utc_day(now_utc)
+    session_dir = out_base / _local_day(now_local)
     session_dir.mkdir(parents=True, exist_ok=True)
-    research_dir = out_base / "research" / _utc_day(now_utc)
+    research_dir = out_base / "research" / _local_day(now_local)
 
     cards: list[str] = []
     briefs: list[str] = []
@@ -450,33 +497,31 @@ def main() -> int:
 
     if cards:
         full = (
-            f"# 股票分析报告（UTC {now_utc.strftime('%Y-%m-%d %H:%M:%S')}）\n\n"
+            f"# 股票分析报告（北京时间 { _fmt_local_second(now_local) }）\n\n"
             + "".join(cards)
             + "## 免责声明\n\n"
             + "本文仅为技术分析与程序化演示，不构成任何投资建议。\n"
         )
-        _write_text(session_dir / "full_report.md", full)
-        _write_text(
-            session_dir / "ai_brief.md",
-            f"# 股票简报（UTC {now_utc.strftime('%Y-%m-%d %H:%M:%S')}）\n\n" + "\n".join(briefs) + "\n",
-        )
-        _write_text(
-            session_dir / "ai_overview.json",
-            json.dumps(
-                {
-                    "generated_at_utc": now_utc.isoformat(),
-                    "provider": args.provider,
-                    "interval": args.interval,
-                    "mtf_interval_effective": mtf_interval_effective,
-                    "items": overview,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
-        print(f"[报告] {session_dir / 'full_report.md'}", file=sys.stderr)
-        print(f"[简报] {session_dir / 'ai_brief.md'}", file=sys.stderr)
-        print(f"[总览] {session_dir / 'ai_overview.json'}", file=sys.stderr)
+        report_path = session_dir / "full_report.md"
+        brief_path = session_dir / "ai_brief.md"
+        overview_path = session_dir / "ai_overview.json"
+        brief_text = f"# 股票简报（北京时间 { _fmt_local_second(now_local) }）\n\n" + "\n".join(briefs) + "\n"
+        overview_payload = {
+            "generated_at_utc": now_utc.isoformat(),
+            "generated_at_local": _fmt_local_second(now_local),
+            "generated_tz": str(now_local.tzinfo or "local"),
+            "provider": args.provider,
+            "interval": args.interval,
+            "mtf_interval_effective": mtf_interval_effective,
+            "items": overview,
+        }
+        _upsert_prepend_text(report_path, full)
+        _upsert_prepend_text(brief_path, brief_text)
+        _write_overview_latest(overview_path, overview_payload)
+        _prune_legacy_timestamped_reports(session_dir)
+        print(f"[报告] {report_path}", file=sys.stderr)
+        print(f"[简报] {brief_path}", file=sys.stderr)
+        print(f"[总览] {overview_path}", file=sys.stderr)
 
         journal_path = out_base / "trade_journal.jsonl"
         journal_entries = load_journal(journal_path)

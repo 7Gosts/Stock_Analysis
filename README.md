@@ -178,7 +178,7 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 
 ## 台账与研报
 
-- **台账**：若跑出 123 候选，会追加 `output/trade_journal.jsonl`，并刷新 `trade_journal_stats_latest.*`、`trade_journal_readable.md`。  
+- **台账**：若跑出 123 候选，会追加 `output/trade_journal.jsonl`，并刷新 `trade_journal_stats_latest.md`、`trade_journal_readable.md`、`trade_journal_readable.csv`。
 - **研报客**：`intel/yanbaoke_client.py` → `tools/yanbaoke/scripts/search.mjs`；**搜索**一般无需 Key，**下载**需 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
 
 ---

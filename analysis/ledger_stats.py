@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -300,6 +302,13 @@ def fmt_iso_local(ts: Any) -> str:
     return dt.astimezone().strftime("%m-%d %H:%M")
 
 
+def fmt_iso_local_full(ts: Any) -> str:
+    dt = parse_iso_utc(str(ts or ""))
+    if not dt:
+        return "—"
+    return dt.astimezone().strftime("%m-%d %H:%M:%S")
+
+
 def _calc_rr(e: dict[str, Any]) -> float | None:
     rv = e.get("rr")
     if isinstance(rv, (int, float)) and float(rv) > 0:
@@ -477,24 +486,30 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
     return "".join(lines)
 
 
-def render_readable_journal(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    lines.append(f"# 股票开单台账（本机 {fmt_local_second(now_utc)}）\n\n")
-    if not entries:
-        lines.append("暂无台账记录。\n")
-        return "".join(lines)
-
-    latest_rows = latest_entries_by_idea(entries)
-
-    lines.append(
-        "| 创建时间 | 市场 | 标的 | 方向 | 类型 | 开单类型 | 入场点位 | 入场区间 | 止损 | 止盈1/2 | RR | 建议动作 | 时间止损截止 | 状态 | 出场 | 已实现盈亏 | 浮动盈亏 |\n"
+def render_readable_journal_csv(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
+    out = io.StringIO(newline="")
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(["更新时间", fmt_local_second(now_utc)])
+    writer.writerow(
+        [
+            "创建时间",
+            "市场",
+            "标的",
+            "方向",
+            "开单",
+            "入场点位",
+            "止损",
+            "止盈1/2",
+            "RR",
+            "建议动作",
+            "时间止损截止",
+            "状态",
+            "出场",
+            "已实现盈亏",
+            "浮动盈亏",
+        ]
     )
-    lines.append("|---|---|---|---|---|---|---:|---|---:|---|---:|---|---|---|---|---:|---:|\n")
-    for e in latest_rows:
-        zone = e.get("entry_zone")
-        zone_text = "—"
-        if isinstance(zone, list) and len(zone) >= 2:
-            zone_text = f"{fmt_px(zone[0])} ~ {fmt_px(zone[1])}"
+    for e in latest_entries_by_idea(entries):
         tps = e.get("take_profit_levels")
         tp_text = "—"
         if isinstance(tps, list) and tps:
@@ -502,14 +517,59 @@ def render_readable_journal(now_utc: datetime, entries: list[dict[str, Any]]) ->
             tp2 = fmt_px(tps[1]) if len(tps) > 1 else "—"
             tp_text = f"{tp1} / {tp2}"
         ex = str(e.get("exit_status") or "—").upper()
-        ddl = fmt_iso_local(e.get("time_stop_deadline_utc"))
+        ddl = fmt_iso_local_full(e.get("time_stop_deadline_utc"))
         rr = _calc_rr(e)
         act = _action_hint_cn(e)
+        order_text = f"{str(e.get('entry_type') or '—')}/{_order_kind_cn(e)}"
+        writer.writerow(
+            [
+                fmt_iso_local_full(e.get("created_at_utc")),
+                e.get("market", "UNK"),
+                e.get("symbol", "UNKNOWN"),
+                e.get("direction", "—"),
+                order_text,
+                fmt_px(e.get("fill_price") if e.get("filled_at_utc") else e.get("entry_price")),
+                fmt_px(e.get("stop_loss")),
+                tp_text,
+                fmt_num(rr),
+                act,
+                ddl,
+                e.get("status", "—"),
+                ex,
+                fmt_pct(e.get("realized_pnl_pct")),
+                fmt_pct(e.get("unrealized_pnl_pct")),
+            ]
+        )
+    return out.getvalue()
+
+
+def render_readable_journal_md(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    lines.append(f"# 股票开单台账（本机 {fmt_local_second(now_utc)}）\n\n")
+    if not entries:
+        lines.append("暂无台账记录。\n")
+        return "".join(lines)
+    lines.append(
+        "| 创建时间 | 市场 | 标的 | 方向 | 开单 | 入场点位 | 止损 | 止盈1/2 | RR | 建议动作 | 时间止损截止 | 状态 | 出场 | 已实现盈亏 | 浮动盈亏 |\n"
+    )
+    lines.append("|---|---|---|---|---|---:|---:|---|---:|---|---|---|---|---:|---:|\n")
+    for e in latest_entries_by_idea(entries):
+        tps = e.get("take_profit_levels")
+        tp_text = "—"
+        if isinstance(tps, list) and tps:
+            tp1 = fmt_px(tps[0])
+            tp2 = fmt_px(tps[1]) if len(tps) > 1 else "—"
+            tp_text = f"{tp1} / {tp2}"
+        ex = str(e.get("exit_status") or "—").upper()
+        ddl = fmt_iso_local_full(e.get("time_stop_deadline_utc"))
+        rr = _calc_rr(e)
+        act = _action_hint_cn(e)
+        order_text = f"{str(e.get('entry_type') or '—')}/{_order_kind_cn(e)}"
         lines.append(
-            f"| {fmt_iso_local(e.get('created_at_utc'))} | {e.get('market', 'UNK')} | {e.get('symbol', 'UNKNOWN')} | "
-            f"{e.get('direction', '—')} | {e.get('entry_type', '—')} | {_order_kind_cn(e)} | "
+            f"| {fmt_iso_local_full(e.get('created_at_utc'))} | {e.get('market', 'UNK')} | {e.get('symbol', 'UNKNOWN')} | "
+            f"{e.get('direction', '—')} | {order_text} | "
             f"{fmt_px(e.get('fill_price') if e.get('filled_at_utc') else e.get('entry_price'))} | "
-            f"{zone_text} | {fmt_px(e.get('stop_loss'))} | {tp_text} | {fmt_num(rr)} | {act} | {ddl} | "
+            f"{fmt_px(e.get('stop_loss'))} | {tp_text} | {fmt_num(rr)} | {act} | {ddl} | "
             f"{e.get('status', '—')} | {ex} | {fmt_pct(e.get('realized_pnl_pct'))} | {fmt_pct(e.get('unrealized_pnl_pct'))} |\n"
         )
     return "".join(lines)
@@ -521,17 +581,20 @@ def write_latest_stats(journal_path: Path) -> tuple[Path, Path]:
     payload = build_stats_payload(entries, now_utc=now_utc)
     payload["journal"] = str(journal_path.resolve())
     md_text = render_markdown(now_utc, payload)
-    readable_text = render_readable_journal(now_utc, entries)
+    readable_md = render_readable_journal_md(now_utc, entries)
+    readable_csv = render_readable_journal_csv(now_utc, entries)
     out_dir = journal_path.parent
     md_path = out_dir / "trade_journal_stats_latest.md"
-    readable_path = out_dir / "trade_journal_readable.md"
+    readable_md_path = out_dir / "trade_journal_readable.md"
+    readable_csv_path = out_dir / "trade_journal_readable.csv"
     # 仅保留 Markdown 统计文件；若历史 JSON 存在则清理掉。
     json_path = out_dir / "trade_journal_stats_latest.json"
     if json_path.exists():
         json_path.unlink()
     md_path.write_text(md_text, encoding="utf-8")
-    readable_path.write_text(readable_text, encoding="utf-8")
-    return md_path, readable_path
+    readable_md_path.write_text(readable_md, encoding="utf-8")
+    readable_csv_path.write_text(readable_csv, encoding="utf-8-sig")
+    return md_path, readable_csv_path
 
 
 def main() -> int:
