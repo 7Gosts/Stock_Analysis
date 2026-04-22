@@ -118,8 +118,6 @@ def resolve_mtf_interval_effective(args: argparse.Namespace) -> tuple[str | None
         return "1w", None
     if prov == "akshare":
         return "1wk", None
-    if prov == "alltick":
-        return "60m", None
     return None, "provider_no_auto_mtf"
 
 
@@ -267,7 +265,7 @@ def main() -> int:
     p.add_argument(
         "--provider",
         default="tickflow",
-        help="数据源：tickflow（默认）/ akshare / alltick / goldapi（贵金属，默认可用内置 Gold API key）",
+        help="数据源：tickflow（默认）/ akshare / goldapi（贵金属，默认可用内置 Gold API key）",
     )
     p.add_argument(
         "--config",
@@ -377,7 +375,7 @@ def main() -> int:
 
         research: dict[str, Any] | None = None
         if args.with_research:
-            kw = (args.research_keyword or asset.get("name") or asset["symbol"]).strip()
+            kw = (args.research_keyword or asset["symbol"]).strip()
             try:
                 research = write_research_bundle(
                     out_dir=research_dir,

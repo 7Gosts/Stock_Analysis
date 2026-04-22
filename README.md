@@ -17,7 +17,7 @@
 
 3. **跑一条默认简报**（读取 `config/market_config.json` 里的 `default_symbols`，数据源默认 `tickflow`）  
    `python cli/stock_analysis.py --market-brief --report-only --out-dir output`  
-   - **多周期**：`--mtf-interval auto`（默认）：`1d` 主图下 tickflow 有 Key 时辅 `4h`，免费档辅 `1w`；akshare 辅 `1wk`；alltick 辅 `60m`。`--no-mtf` 关闭。  
+   - **多周期**：`--mtf-interval auto`（默认）：`1d` 主图下 tickflow 有 Key 时辅 `4h`，免费档辅 `1w`；akshare 辅 `1wk`。`--no-mtf` 关闭。
    - **结构过滤 / 时间止损**：写入 `ai_overview.json` 的 `stats` 与台账 `trade_journal.jsonl`（字段含 `structure_filter_flags`、`time_stop_deadline_utc`、`lifecycle_v1`、`mtf_aligned` 等）。
 
 4. **看产物**（`--out-dir` 下；会话目录名为 **UTC 日期**）  
@@ -85,7 +85,7 @@ flowchart LR
 
 ## 能力与指标（v1）
 
-- **数据源（`--provider`）**：`tickflow`（默认）/ `akshare` / `alltick` / `goldapi`  
+- **数据源（`--provider`）**：`tickflow`（默认）/ `akshare` / `goldapi`
 - **输出**：简报、总览 JSON、全文报告；可选研报检索目录；台账 `trade_journal.jsonl` 及统计快照、可读版  
 - **指标**：SMA20/60、近 1/5 根涨跌幅、近窗 swing 高/低、Fib 区间、趋势标签（偏多/偏空/震荡等）  
 - **交易辅助**：威科夫背景过滤（`long_only` / `short_only` / `neutral`）+ 123 结构（P1/P2/P3、触发/止损/TP）
@@ -116,9 +116,6 @@ python cli/stock_analysis.py --symbol AAPL --interval 1d --limit 180 --report-on
 # 简报 + 研报线索（需 Node）
 python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5
 
-# AllTick
-ALLTICK_TOKEN="你的token" python cli/stock_analysis.py --provider alltick --market-brief --report-only --out-dir output
-
 # 贵金属（见下节 Gold API）
 python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --limit 180 --report-only --out-dir output
 ```
@@ -141,7 +138,6 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 |----------|------|------------------|
 | `tickflow` | 默认；无 Key 可走免费日线 | 可选 `TICKFLOW_API_KEY` 用完整服务 |
 | `akshare` | A 股 / 美股日线等 | 一般无需 token |
-| `alltick` | 多周期等 | **`ALLTICK_TOKEN`** 必填 |
 | `goldapi` | [Gold API](https://gold-api.cn) 贵金属 | 默认 key 在 `analysis/gold_api.py`；可用 **`GOLD_API_APPKEY`** / **`GOLD_API_KEY`** 覆盖；可选 **`GOLD_API_BASE`** |
 
 ---

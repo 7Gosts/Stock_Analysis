@@ -196,76 +196,12 @@ def fetch_ohlcv_tickflow(*, ticker: str, market: str, interval: str, limit: int)
     return rows
 
 
-def _alltick_kline_type(interval: str) -> int:
-    mapping = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "60m": 5, "1d": 8, "1w": 9, "1mo": 10}
-    return mapping.get(interval, 8)
-
-
-def _to_alltick_code(ticker: str, market: str) -> str:
-    raw = ticker.strip().upper()
-    mkt = market.strip().upper()
-    if "." in raw:
-        return raw
-    if mkt == "CN":
-        if raw.startswith(("6", "9")):
-            return f"{raw}.SH"
-        if raw.startswith(("0", "3")):
-            return f"{raw}.SZ"
-    if mkt == "US":
-        return f"{raw}.US"
-    if mkt == "HK":
-        return f"{raw}.HK"
-    return raw
-
-
-def fetch_ohlcv_alltick(*, ticker: str, market: str, interval: str, limit: int) -> list[dict[str, Any]]:
-    token = os.getenv("ALLTICK_TOKEN", "").strip()
-    if not token:
-        raise ValueError("ALLTICK_TOKEN 未设置")
-    trace = f"stock-analysis-{int(datetime.now(timezone.utc).timestamp())}"
-    query_obj = {
-        "trace": trace,
-        "data": {
-            "code": _to_alltick_code(ticker=ticker, market=market),
-            "kline_type": _alltick_kline_type(interval),
-            "kline_timestamp_end": 0,
-            "query_kline_num": max(30, min(int(limit), 500)),
-            "adjust_type": 0,
-        },
-    }
-    query = urlencode({"token": token, "query": json.dumps(query_obj, separators=(",", ":"))})
-    url = f"https://quote.alltick.co/quote-stock-b-api/kline?{query}"
-    payload = _http_get_json(url)
-    if int(payload.get("ret", -1)) != 200:
-        raise ValueError(f"AllTick 返回错误: {payload.get('msg') or payload}")
-    kline_list = ((payload.get("data") or {}).get("kline_list")) or []
-    rows: list[dict[str, Any]] = []
-    for item in kline_list:
-        t_sec = int(item["timestamp"])
-        dt = datetime.fromtimestamp(t_sec, tz=timezone.utc)
-        rows.append(
-            {
-                "time": dt.isoformat(),
-                "open": float(item["open_price"]),
-                "high": float(item["high_price"]),
-                "low": float(item["low_price"]),
-                "close": float(item["close_price"]),
-                "volume": float(item.get("volume", 0.0)),
-            }
-        )
-    rows = [r for r in rows if r["open"] > 0 and r["high"] > 0 and r["low"] > 0 and r["close"] > 0]
-    rows.sort(key=lambda x: x["time"])
-    return rows
-
-
 def fetch_ohlcv(provider: str, ticker: str, market: str, interval: str, limit: int) -> list[dict[str, Any]]:
     p = (provider or "tickflow").strip().lower()
     if p == "akshare":
         return fetch_ohlcv_akshare(ticker=ticker, market=market, interval=interval, limit=limit)
     if p == "tickflow":
         return fetch_ohlcv_tickflow(ticker=ticker, market=market, interval=interval, limit=limit)
-    if p == "alltick":
-        return fetch_ohlcv_alltick(ticker=ticker, market=market, interval=interval, limit=limit)
     if p in {"goldapi", "gold-api", "gold_api"}:
         return fetch_ohlcv_goldapi(ticker=ticker, market=market, interval=interval, limit=limit)
-    raise ValueError(f"暂不支持的 provider: {provider}（支持 akshare/tickflow/alltick/goldapi）")
+    raise ValueError(f"暂不支持的 provider: {provider}（支持 akshare/tickflow/goldapi）")

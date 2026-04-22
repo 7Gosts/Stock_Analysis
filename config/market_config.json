@@ -9,50 +9,64 @@
       "symbol": "600519.SH",
       "name": "贵州茅台",
       "market": "CN",
-      "data_symbol": "600519.SH"
+      "data_symbol": "600519.SH",
+      "research_keyword": "贵州茅台",
+      "tags": ["白酒", "消费", "蓝筹"]
     },
     {
       "symbol": "000001.SZ",
       "name": "平安银行",
       "market": "CN",
-      "data_symbol": "000001.SZ"
+      "data_symbol": "000001.SZ",
+      "research_keyword": "平安银行",
+      "tags": ["银行", "金融", "蓝筹"]
     },
     {
       "symbol": "002050.SZ",
       "name": "三花智控",
       "market": "CN",
       "data_symbol": "002050.SZ",
-      "tags": ["液冷", "数据中心热管理", "汽车热管理"]
+      "research_keyword": "三花智控",
+      "tags": ["液冷", "数据中心热管理", "汽车热管理", "机器人"]
     },
     {
       "symbol": "AAPL",
       "name": "苹果",
       "market": "US",
-      "data_symbol": "AAPL"
+      "data_symbol": "AAPL",
+      "research_keyword": "AAPL",
+      "tags": ["科技", "消费电子", "手机", "AI"]
     },
     {
       "symbol": "NVDA",
       "name": "英伟达",
       "market": "US",
-      "data_symbol": "NVDA"
+      "data_symbol": "NVDA",
+      "research_keyword": "NVDA",
+      "tags": ["AI", "芯片", "GPU", "算力"]
     },
     {
       "symbol": "TSLA",
       "name": "特斯拉",
       "market": "US",
-      "data_symbol": "TSLA"
+      "data_symbol": "TSLA",
+      "research_keyword": "TSLA",
+      "tags": ["电动车", "自动驾驶", "机器人", "储能"]
     },
     {
       "symbol": "MSFT",
       "name": "Microsoft",
       "market": "US",
-      "data_symbol": "MSFT"
+      "data_symbol": "MSFT",
+      "research_keyword": "MSFT",
+      "tags": ["云服务", "AI", "软件"]
     },
     {
       "symbol": "AU9999",
       "name": "上海金 Au9999",
       "market": "PM",
       "data_symbol": "Au9999",
+      "research_keyword": "黄金",
       "tags": ["贵金属", "黄金"]
     }
   ]

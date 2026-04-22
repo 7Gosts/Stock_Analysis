@@ -21,7 +21,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `price_feeds.py` | 统一入口 `fetch_ohlcv(provider, …)`：tickflow / akshare / alltick / goldapi |
+| `price_feeds.py` | 统一入口 `fetch_ohlcv(provider, …)`：tickflow / akshare / goldapi |
 | `kline_metrics.py` | SMA/Fib/趋势、威科夫背景、123 结构、`structure_filters_v1`、`time_stop_v1`、`mtf_v1`（辅周期可选）、`compute_ohlc_stats`、`format_*` 报告片段 |
 | `ledger_stats.py` | 读 `trade_journal.jsonl`，生成周/月统计、`breakdown_*d`（按 status / wyckoff_bias、时间止损过期挂单数）、可读 Markdown |
 | `gold_api.py` | Gold API（gold-api.cn）HTTP：品种解析、`fetch_ohlcv_goldapi` |
