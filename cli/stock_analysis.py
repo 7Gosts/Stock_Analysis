@@ -22,14 +22,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analysis.kline_metrics import (
-    compute_ohlc_stats,
-    format_brief_line,
-    format_report_card,
-    time_stop_deadline_utc,
-)
+from analysis.kline_metrics import time_stop_deadline_utc
+from analysis import kline_metrics as stock_kline_metrics
+from analysis import crypto_kline_analysis
 from analysis.price_feeds import fetch_ohlcv
 from analysis.ledger_stats import write_latest_stats
+from analysis.trade_journal import (
+    has_active_idea,
+    load_journal,
+    save_journal,
+    update_idea_with_rows,
+)
 from intel.yanbaoke_client import write_research_bundle
 
 
@@ -94,7 +97,13 @@ def _safe_float(v: Any) -> float | None:
     return None
 
 
-def resolve_mtf_interval_effective(args: argparse.Namespace) -> tuple[str | None, str | None]:
+def _classify_order_kind_cn(signal_last: float, entry_zone: list[float]) -> str:
+    lo = float(min(entry_zone))
+    hi = float(max(entry_zone))
+    return "实时单" if lo <= signal_last <= hi else "挂单"
+
+
+def resolve_mtf_interval_effective(args: argparse.Namespace, market: str) -> tuple[str | None, str | None]:
     """返回 (辅周期, 跳过原因)。auto：1d 主图按数据源选辅周期。"""
     if getattr(args, "no_mtf", False):
         return None, None
@@ -107,18 +116,17 @@ def resolve_mtf_interval_effective(args: argparse.Namespace) -> tuple[str | None
 
     main = str(args.interval).strip().lower()
     prov = str(args.provider).strip().lower()
-    if prov in {"goldapi", "gold_api", "gold-api"}:
-        return None, "goldapi_no_mtf"
+    mkt = str(market or "").upper()
     if main not in {"1d", "1day"}:
         return None, "auto_only_for_daily_main"
 
-    if prov == "tickflow":
-        if os.getenv("TICKFLOW_API_KEY", "").strip():
-            return "4h", None
+    if mkt == "CRYPTO" or prov == "gateio":
+        return "4h", None
+    if mkt in {"PM", "GOLD", "METAL"} or prov in {"goldapi", "gold_api", "gold-api"}:
         return "1w", None
-    if prov == "akshare":
-        return "1wk", None
-    return None, "provider_no_auto_mtf"
+    if prov == "tickflow":
+        return "1w", None
+    return "1w", None
 
 
 def _valid_until_utc(now_utc: datetime, interval: str) -> datetime:
@@ -164,6 +172,10 @@ def build_trade_journal_entry(
     zone_half = max(abs(entry) * 0.001, abs(entry - stop) * 0.2)
     entry_zone = [round(entry - zone_half, 6), round(entry + zone_half, 6)]
     fill_price = last_px if last_px is not None else entry
+    order_kind_cn = _classify_order_kind_cn(fill_price, entry_zone)
+    risk = abs(entry - stop)
+    reward = abs(tp1 - entry)
+    rr = round(reward / risk, 4) if risk > 1e-12 and reward > 1e-12 else None
     stable_key = "|".join(
         [
             str(asset.get("symbol") or "UNKNOWN"),
@@ -217,12 +229,14 @@ def build_trade_journal_entry(
         "plan_type": "tactical",
         "direction": direction,
         "entry_type": "market" if triggered else "limit",
+        "order_kind_cn": order_kind_cn,
         "entry_zone": entry_zone,
         "entry_price": round(entry, 6),
         "signal_last": round(fill_price, 6),
         "position_risk_pct": 0.5,
         "stop_loss": round(stop, 6),
         "take_profit_levels": [round(tp1, 6), round(tp2, 6)],
+        "rr": rr,
         "strategy_reason": (
             f"{interval} {stats.get('trend', 'N/A')}；"
             f"威科夫背景={bg.get('bias', 'neutral')}；"
@@ -261,11 +275,11 @@ def append_trade_journal(path: Path, entries: list[dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="股票 K 线分析：报告 + JSON")
+    p = argparse.ArgumentParser(description="股票/加密货币 K 线分析：报告 + JSON")
     p.add_argument(
         "--provider",
         default="tickflow",
-        help="数据源：tickflow（默认）/ akshare / goldapi（贵金属，默认可用内置 Gold API key）",
+        help="数据源：tickflow（默认）/ gateio（加密货币）/ goldapi（贵金属）",
     )
     p.add_argument(
         "--config",
@@ -292,6 +306,12 @@ def main() -> int:
         help="多周期辅图：auto（默认按数据源自动）/ 如 4h 1wk 60m；配合 --no-mtf 关闭",
     )
     p.add_argument("--no-mtf", action="store_true", help="关闭多周期辅图拉取与共振字段")
+    p.add_argument(
+        "--analysis-style",
+        choices=["auto", "stock", "crypto"],
+        default="auto",
+        help="分析引擎：auto（按 market/provider 自动）/stock/crypto",
+    )
     args = p.parse_args()
 
     if not args.market_brief and not args.symbol:
@@ -307,8 +327,9 @@ def main() -> int:
         if s in assets_map:
             selected = [s]
         else:
-            # 允许直接传原始代码，临时组装资产定义（默认按美股处理）
-            assets_map[s] = {"symbol": s, "name": s, "market": "US", "data_symbol": s}
+            # 允许直接传原始代码，临时组装资产定义（默认美股；形如 BTC_USDT 走 CRYPTO）
+            market = "CRYPTO" if "_" in s and s.endswith("USDT") else "US"
+            assets_map[s] = {"symbol": s, "name": s, "market": market, "data_symbol": s}
             selected = [s]
     if not selected:
         print("未找到可分析标的，请检查配置文件。", file=sys.stderr)
@@ -324,11 +345,19 @@ def main() -> int:
     briefs: list[str] = []
     overview: list[dict[str, Any]] = []
     journal_candidates: list[dict[str, Any]] = []
-
-    mtf_interval_effective, mtf_skip_reason = resolve_mtf_interval_effective(args)
+    latest_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    mtf_interval_effective: str | None = None
 
     for symbol in selected:
         asset = assets_map[symbol]
+        market = str(asset.get("market") or "").upper()
+        mtf_interval_effective, mtf_skip_reason = resolve_mtf_interval_effective(args, market)
+        if args.analysis_style == "stock":
+            km = stock_kline_metrics
+        elif args.analysis_style == "crypto":
+            km = crypto_kline_analysis
+        else:
+            km = crypto_kline_analysis if (market == "CRYPTO" or str(args.provider).lower() == "gateio") else stock_kline_metrics
         try:
             rows = fetch_ohlcv(
                 provider=args.provider,
@@ -343,6 +372,7 @@ def main() -> int:
         if len(rows) < 30:
             print(f"[跳过] {symbol} 数据不足（<30根）", file=sys.stderr)
             continue
+        latest_rows_by_symbol[symbol] = rows
 
         mtf_rows: list[dict[str, Any]] | None = None
         mtf_note: str | None = None if mtf_interval_effective else mtf_skip_reason
@@ -363,11 +393,12 @@ def main() -> int:
                 suf = "secondary_insufficient"
                 mtf_note = f"{mtf_note};{suf}" if mtf_note else suf
 
-        stats = compute_ohlc_stats(
+        stats = km.compute_ohlc_stats(
             rows,
             interval=args.interval,
             secondary_rows=mtf_rows,
             secondary_interval=mtf_interval_effective if mtf_rows else None,
+            market=market,
         )
         if not stats:
             print(f"[跳过] {symbol} 指标计算失败", file=sys.stderr)
@@ -387,8 +418,8 @@ def main() -> int:
                 print(f"[研报] {symbol} 搜索失败（已跳过）：{e}", file=sys.stderr)
                 research = None
 
-        cards.append(format_report_card(asset, stats, research=research))
-        briefs.append(format_brief_line(asset, stats, research=research))
+        cards.append(km.format_report_card(asset, stats, research=research))
+        briefs.append(km.format_brief_line(asset, stats, research=research))
         raw_tags = asset.get("tags")
         item_tags = raw_tags if isinstance(raw_tags, list) else []
         item_tags = [str(t).strip() for t in item_tags if str(t).strip()]
@@ -448,13 +479,34 @@ def main() -> int:
         print(f"[总览] {session_dir / 'ai_overview.json'}", file=sys.stderr)
 
         journal_path = out_base / "trade_journal.jsonl"
-        append_trade_journal(journal_path, journal_candidates)
-        if journal_candidates:
-            print(f"[台账] 追加 {len(journal_candidates)} 条 -> {journal_path}", file=sys.stderr)
+        journal_entries = load_journal(journal_path)
+        journal_updated = 0
+        for e in journal_entries:
+            sym = str(e.get("symbol") or "").upper()
+            rows = latest_rows_by_symbol.get(sym)
+            if rows and update_idea_with_rows(e, rows, now_utc):
+                journal_updated += 1
+        journal_created = 0
+        for idea in journal_candidates:
+            if has_active_idea(
+                journal_entries,
+                symbol=str(idea.get("symbol") or ""),
+                interval=str(idea.get("interval") or ""),
+                direction=str(idea.get("direction") or ""),
+                plan_type=str(idea.get("plan_type") or "tactical"),
+            ):
+                continue
+            journal_entries.append(idea)
+            journal_created += 1
+        if journal_created or journal_updated:
+            save_journal(journal_path, journal_entries)
+            print(
+                f"[台账] 更新 {journal_updated} 条，新增 {journal_created} 条 -> {journal_path}",
+                file=sys.stderr,
+            )
             try:
-                json_path, md_path, readable_path = write_latest_stats(journal_path)
+                md_path, readable_path = write_latest_stats(journal_path)
                 print(f"[台账统计] {md_path}", file=sys.stderr)
-                print(f"[台账统计JSON] {json_path}", file=sys.stderr)
                 print(f"[台账可读版] {readable_path}", file=sys.stderr)
             except Exception as e:
                 print(f"[警告] 台账统计生成失败: {e}", file=sys.stderr)

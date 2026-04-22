@@ -1,7 +1,57 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
+from pathlib import Path
 from typing import Any
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_DEFAULT_CFG_PATH = _SCRIPT_DIR.parent / "config" / "analysis_defaults.yaml"
+
+
+def _load_analysis_config() -> dict[str, Any]:
+    cfg_path = os.getenv("STOCK_ANALYSIS_CRYPTO_CONFIG", "").strip()
+    path = Path(cfg_path).expanduser().resolve() if cfg_path else _DEFAULT_CFG_PATH
+    if not path.is_file():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    try:
+        obj = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+_CFG = _load_analysis_config()
+
+
+def _ma_triplet_for_market(market: str | None) -> tuple[int, int, int]:
+    ms = _CFG.get("ma_system") if isinstance(_CFG, dict) else None
+    if not isinstance(ms, dict):
+        return (8, 21, 55)
+    m = str(market or "").upper()
+    if m == "CRYPTO":
+        sec = ms.get("crypto")
+    elif m in {"PM", "GOLD", "METAL"}:
+        sec = ms.get("gold")
+    else:
+        sec = ms.get("equity")
+    if not isinstance(sec, dict):
+        sec = ms.get("default")
+    if not isinstance(sec, dict):
+        return (8, 21, 55)
+    try:
+        short = int(sec.get("short", 8))
+        mid = int(sec.get("mid", 21))
+        long = int(sec.get("long", 55))
+    except Exception:
+        return (8, 21, 55)
+    if short <= 0 or mid <= 0 or long <= 0:
+        return (8, 21, 55)
+    return (short, mid, long)
 
 
 def _avg(values: list[float]) -> float | None:
@@ -457,6 +507,7 @@ def compute_ohlc_stats(
     interval: str,
     secondary_rows: list[dict[str, Any]] | None = None,
     secondary_interval: str | None = None,
+    market: str | None = None,
 ) -> dict[str, Any] | None:
     closes = [float(r["close"]) for r in rows if r.get("close") is not None]
     highs = [float(r["high"]) for r in rows if r.get("high") is not None]
@@ -469,6 +520,10 @@ def compute_ohlc_stats(
     last = closes[-1]
     sma20 = _sma(closes, 20)
     sma60 = _sma(closes, 60)
+    ma_short, ma_mid, ma_long = _ma_triplet_for_market(market)
+    ma8 = _sma(closes, ma_short)
+    ma21 = _sma(closes, ma_mid)
+    ma55 = _sma(closes, ma_long)
     ret1 = _pct(last, closes[-2]) if n >= 2 else None
     ret5 = _pct(last, closes[-6]) if n >= 6 else None
 
@@ -533,6 +588,17 @@ def compute_ohlc_stats(
         "price_vs_fib_zone": fib_zone,
         "trend": trend,
         "n_bars": n,
+        "ma_system": {
+            "ma_short": ma_short,
+            "ma_mid": ma_mid,
+            "ma_long": ma_long,
+            "sma_short": ma8,
+            "sma_mid": ma21,
+            "sma_long": ma55,
+        },
+        "p_ma_short_pct": _pct(last, ma8) if ma8 else None,
+        "p_ma_mid_pct": _pct(last, ma21) if ma21 else None,
+        "p_ma_long_pct": _pct(last, ma55) if ma55 else None,
         "wyckoff_123_v1": wyckoff_123,
         "structure_filters_v1": structure_filters_v1,
         "time_stop_v1": time_stop_v1,
@@ -564,6 +630,7 @@ def format_report_card(asset: dict[str, Any], stats: dict[str, Any], research: d
     sf = stats.get("structure_filters_v1") or {}
     mtf = stats.get("mtf_v1") or {}
     tsv = stats.get("time_stop_v1") or {}
+    ma = stats.get("ma_system") or {}
 
     def _fmt_pct(x: float | None) -> str:
         return "N/A" if x is None else f"{x:.2f}%"
@@ -579,6 +646,16 @@ def format_report_card(asset: dict[str, Any], stats: dict[str, Any], research: d
     lines.append(
         f"- **均线结构**：SMA20={_fmt_px(sma20) if sma20 else 'N/A'}，SMA60={_fmt_px(sma60) if sma60 else 'N/A'}\n"
     )
+    if isinstance(ma, dict):
+        ms = int(ma.get("ma_short", 8) or 8)
+        mm = int(ma.get("ma_mid", 21) or 21)
+        ml = int(ma.get("ma_long", 55) or 55)
+        lines.append(
+            f"- **均线系统（SMA{ms}/{mm}/{ml}）**："
+            f"SMA{ms}={_fmt_px(float(ma['sma_short'])) if ma.get('sma_short') else 'N/A'}，"
+            f"SMA{mm}={_fmt_px(float(ma['sma_mid'])) if ma.get('sma_mid') else 'N/A'}，"
+            f"SMA{ml}={_fmt_px(float(ma['sma_long'])) if ma.get('sma_long') else 'N/A'}\n"
+        )
     lines.append(
         f"- **近端结构范围**：低点 {_fmt_px(stats['swing_low'])}（{stats['swing_low_time']}）"
         f" -> 高点 {_fmt_px(stats['swing_high'])}（{stats['swing_high_time']}）\n"

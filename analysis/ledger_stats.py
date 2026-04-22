@@ -11,7 +11,36 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_analysis_config() -> dict[str, Any]:
+    cfg_path = _REPO_ROOT / "config" / "analysis_defaults.yaml"
+    if not cfg_path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+_CFG = _load_analysis_config()
+
+
+def _action_thresholds() -> tuple[float, float]:
+    node = _CFG.get("journal_action_thresholds")
+    if not isinstance(node, dict):
+        return 1.45, 1.2
+    worth = node.get("worth_doing_rr")
+    observe = node.get("observe_rr")
+    worth_v = float(worth) if isinstance(worth, (int, float)) else 1.45
+    observe_v = float(observe) if isinstance(observe, (int, float)) else 1.2
+    if worth_v < observe_v:
+        worth_v = observe_v
+    return worth_v, observe_v
 
 
 def parse_iso_utc(ts: str | None) -> datetime | None:
@@ -112,8 +141,20 @@ def period_breakdown(entries: list[dict[str, Any]], *, now_utc: datetime, days: 
         scoped.append(e)
 
     stale = 0
+    active_count = 0
+    expired_count = 0
+    by_symbol_active_expired: dict[str, dict[str, int]] = {}
     for e in scoped:
-        if str(e.get("status") or "") not in {"pending", "watch"}:
+        status = str(e.get("status") or "")
+        symbol = str(e.get("symbol") or "UNKNOWN")
+        by_symbol_active_expired.setdefault(symbol, {"active": 0, "expired": 0})
+        if status in {"watch", "pending", "filled"}:
+            active_count += 1
+            by_symbol_active_expired[symbol]["active"] += 1
+        elif status == "expired":
+            expired_count += 1
+            by_symbol_active_expired[symbol]["expired"] += 1
+        if status not in {"pending", "watch"}:
             continue
         ddl = parse_iso_utc(str(e.get("time_stop_deadline_utc") or ""))
         if ddl and ddl < now_utc:
@@ -131,6 +172,14 @@ def period_breakdown(entries: list[dict[str, Any]], *, now_utc: datetime, days: 
         "candidate_total": len(scoped),
         "by_status": bucket("status"),
         "by_wyckoff_bias": bucket("wyckoff_bias"),
+        "active_count": active_count,
+        "expired_count": expired_count,
+        "by_symbol_active_expired": dict(
+            sorted(
+                by_symbol_active_expired.items(),
+                key=lambda kv: (-(kv[1]["active"] + kv[1]["expired"]), kv[0]),
+            )
+        ),
         "stale_time_stop_pending": stale,
     }
 
@@ -189,6 +238,44 @@ def period_stats_by_symbol(entries: list[dict[str, Any]], *, now_utc: datetime, 
     return out
 
 
+def period_stats_by_market(entries: list[dict[str, Any]], *, now_utc: datetime, days: int) -> list[dict[str, Any]]:
+    start = now_utc - timedelta(days=days)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        created = parse_iso_utc(str(e.get("created_at_utc") or ""))
+        if created is None or not (start <= created <= now_utc):
+            continue
+        market = str(e.get("market") or "UNK").upper()
+        grouped.setdefault(market, []).append(e)
+    out: list[dict[str, Any]] = []
+    for market, items in grouped.items():
+        total = len(items)
+        hit = 0
+        tp = 0
+        sl = 0
+        for e in items:
+            status = str(e.get("status") or "")
+            if status in {"filled", "closed"} or e.get("filled_at_utc"):
+                hit += 1
+            ex = str(e.get("exit_status") or "")
+            if ex == "tp":
+                tp += 1
+            elif ex == "sl":
+                sl += 1
+        closed_ts = tp + sl
+        out.append(
+            {
+                "market": market,
+                "candidate_total": total,
+                "hit_rate_pct": safe_pct(hit, total),
+                "tp_rate_pct": safe_pct(tp, closed_ts),
+                "sl_rate_pct": safe_pct(sl, closed_ts),
+            }
+        )
+    out.sort(key=lambda x: (-int(x["candidate_total"]), str(x["market"])))
+    return out
+
+
 def fmt_pct(v: float | None) -> str:
     return f"{v:.2f}%" if isinstance(v, (int, float)) else "—"
 
@@ -211,6 +298,51 @@ def fmt_iso_local(ts: Any) -> str:
     if not dt:
         return "—"
     return dt.astimezone().strftime("%m-%d %H:%M")
+
+
+def _calc_rr(e: dict[str, Any]) -> float | None:
+    rv = e.get("rr")
+    if isinstance(rv, (int, float)) and float(rv) > 0:
+        return float(rv)
+    entry = e.get("fill_price") if e.get("filled_at_utc") else e.get("entry_price")
+    stop = e.get("stop_loss")
+    tps = e.get("take_profit_levels")
+    if not isinstance(entry, (int, float)) or not isinstance(stop, (int, float)):
+        return None
+    if not isinstance(tps, list) or not tps or not isinstance(tps[0], (int, float)):
+        return None
+    risk = abs(float(entry) - float(stop))
+    reward = abs(float(tps[0]) - float(entry))
+    if risk <= 1e-12 or reward <= 1e-12:
+        return None
+    return round(reward / risk, 4)
+
+
+def _order_kind_cn(e: dict[str, Any]) -> str:
+    v = str(e.get("order_kind_cn") or "").strip()
+    if v:
+        return v
+    zone = e.get("entry_zone")
+    sl = e.get("signal_last")
+    if isinstance(zone, list) and len(zone) >= 2 and isinstance(sl, (int, float)):
+        lo, hi = float(min(zone)), float(max(zone))
+        return "实时单" if lo <= float(sl) <= hi else "挂单"
+    return "—"
+
+
+def _action_hint_cn(e: dict[str, Any]) -> str:
+    status = str(e.get("status") or "")
+    rr = _calc_rr(e)
+    worth_rr, observe_rr = _action_thresholds()
+    if status in {"expired", "closed"}:
+        return "保守观望"
+    if rr is None:
+        return "再观察"
+    if rr >= worth_rr and status in {"pending", "filled", "watch"}:
+        return "值得做"
+    if rr >= observe_rr:
+        return "再观察"
+    return "保守观望"
 
 
 def fmt_local_second(dt: datetime) -> str:
@@ -255,6 +387,7 @@ def build_stats_payload(entries: list[dict[str, Any]], now_utc: datetime | None 
         "week_7d": period_stats(entries, now_utc=now, days=7),
         "month_30d": period_stats(entries, now_utc=now, days=30),
         "by_symbol_30d": period_stats_by_symbol(entries, now_utc=now, days=30),
+        "by_market_30d": period_stats_by_market(entries, now_utc=now, days=30),
         "breakdown_7d": period_breakdown(entries, now_utc=now, days=7),
         "breakdown_30d": period_breakdown(entries, now_utc=now, days=30),
     }
@@ -270,10 +403,21 @@ def _md_count_table(title: str, data: dict[str, int]) -> str:
     return "".join(lines)
 
 
+def _md_symbol_active_expired(data: dict[str, dict[str, int]]) -> str:
+    if not data:
+        return ""
+    lines = ["| 标的 | active(watch/pending/filled) | expired |\n", "|---|---:|---:|\n"]
+    for symbol, row in data.items():
+        lines.append(f"| {symbol} | {int(row.get('active', 0))} | {int(row.get('expired', 0))} |\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
 def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
     week = payload["week_7d"]
     month = payload["month_30d"]
     by_symbol_30d = payload["by_symbol_30d"]
+    by_market_30d = payload.get("by_market_30d") or []
     lines: list[str] = []
     lines.append(f"# 股票交易台账统计（本机 {fmt_local_second(now_utc)}）\n\n")
     lines.append("| 统计窗口 | 候选单 | 命中率 | 止盈率 | 止损率 | 平均盈亏比 |\n")
@@ -295,13 +439,23 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
         if b7:
             lines.append(f"### 近7天（候选 {b7.get('candidate_total', 0)}）\n\n")
             lines.append(f"- 时间止损已过期仍挂单：**{b7.get('stale_time_stop_pending', 0)}** 条\n\n")
+            lines.append(
+                f"- active（watch/pending/filled）：**{b7.get('active_count', 0)}**；"
+                f"expired：**{b7.get('expired_count', 0)}**\n\n"
+            )
             lines.append(_md_count_table("按 status", b7.get("by_status") or {}))
             lines.append(_md_count_table("按 wyckoff_bias", b7.get("by_wyckoff_bias") or {}))
+            lines.append(_md_symbol_active_expired(b7.get("by_symbol_active_expired") or {}))
         if b30:
             lines.append(f"### 近30天（候选 {b30.get('candidate_total', 0)}）\n\n")
             lines.append(f"- 时间止损已过期仍挂单：**{b30.get('stale_time_stop_pending', 0)}** 条\n\n")
+            lines.append(
+                f"- active（watch/pending/filled）：**{b30.get('active_count', 0)}**；"
+                f"expired：**{b30.get('expired_count', 0)}**\n\n"
+            )
             lines.append(_md_count_table("按 status", b30.get("by_status") or {}))
             lines.append(_md_count_table("按 wyckoff_bias", b30.get("by_wyckoff_bias") or {}))
+            lines.append(_md_symbol_active_expired(b30.get("by_symbol_active_expired") or {}))
     if by_symbol_30d:
         lines.append("\n## 分组统计（按标的，近30天）\n\n")
         lines.append("| 标的 | 候选单 | 命中率 | 止盈率 | 止损率 | 平均盈亏比 |\n")
@@ -310,6 +464,15 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
             lines.append(
                 f"| {row['symbol']} | {row['candidate_total']} | {fmt_pct(row['hit_rate_pct'])} | "
                 f"{fmt_pct(row['tp_rate_pct'])} | {fmt_pct(row['sl_rate_pct'])} | {fmt_num(row['avg_rr'])} |\n"
+            )
+    if by_market_30d:
+        lines.append("\n## 分组统计（按市场，近30天）\n\n")
+        lines.append("| 市场 | 候选单 | 命中率 | 止盈率 | 止损率 |\n")
+        lines.append("|---|---:|---:|---:|---:|\n")
+        for row in by_market_30d:
+            lines.append(
+                f"| {row['market']} | {row['candidate_total']} | {fmt_pct(row['hit_rate_pct'])} | "
+                f"{fmt_pct(row['tp_rate_pct'])} | {fmt_pct(row['sl_rate_pct'])} |\n"
             )
     return "".join(lines)
 
@@ -324,9 +487,9 @@ def render_readable_journal(now_utc: datetime, entries: list[dict[str, Any]]) ->
     latest_rows = latest_entries_by_idea(entries)
 
     lines.append(
-        "| 创建时间 | 标的 | 方向 | 类型 | 入场点位 | 入场区间 | 止损 | 止盈1/2 | 时间止损截止 | 状态 | 出场 | 已实现盈亏 |\n"
+        "| 创建时间 | 市场 | 标的 | 方向 | 类型 | 开单类型 | 入场点位 | 入场区间 | 止损 | 止盈1/2 | RR | 建议动作 | 时间止损截止 | 状态 | 出场 | 已实现盈亏 | 浮动盈亏 |\n"
     )
-    lines.append("|---|---|---|---|---:|---|---:|---|---|---|---|---:|\n")
+    lines.append("|---|---|---|---|---|---|---:|---|---:|---|---:|---|---|---|---|---:|---:|\n")
     for e in latest_rows:
         zone = e.get("entry_zone")
         zone_text = "—"
@@ -340,17 +503,19 @@ def render_readable_journal(now_utc: datetime, entries: list[dict[str, Any]]) ->
             tp_text = f"{tp1} / {tp2}"
         ex = str(e.get("exit_status") or "—").upper()
         ddl = fmt_iso_local(e.get("time_stop_deadline_utc"))
+        rr = _calc_rr(e)
+        act = _action_hint_cn(e)
         lines.append(
-            f"| {fmt_iso_local(e.get('created_at_utc'))} | {e.get('symbol', 'UNKNOWN')} | "
-            f"{e.get('direction', '—')} | {e.get('entry_type', '—')} | "
+            f"| {fmt_iso_local(e.get('created_at_utc'))} | {e.get('market', 'UNK')} | {e.get('symbol', 'UNKNOWN')} | "
+            f"{e.get('direction', '—')} | {e.get('entry_type', '—')} | {_order_kind_cn(e)} | "
             f"{fmt_px(e.get('fill_price') if e.get('filled_at_utc') else e.get('entry_price'))} | "
-            f"{zone_text} | {fmt_px(e.get('stop_loss'))} | {tp_text} | {ddl} | "
-            f"{e.get('status', '—')} | {ex} | {fmt_pct(e.get('realized_pnl_pct'))} |\n"
+            f"{zone_text} | {fmt_px(e.get('stop_loss'))} | {tp_text} | {fmt_num(rr)} | {act} | {ddl} | "
+            f"{e.get('status', '—')} | {ex} | {fmt_pct(e.get('realized_pnl_pct'))} | {fmt_pct(e.get('unrealized_pnl_pct'))} |\n"
         )
     return "".join(lines)
 
 
-def write_latest_stats(journal_path: Path) -> tuple[Path, Path, Path]:
+def write_latest_stats(journal_path: Path) -> tuple[Path, Path]:
     entries = load_journal(journal_path)
     now_utc = datetime.now(timezone.utc)
     payload = build_stats_payload(entries, now_utc=now_utc)
@@ -358,13 +523,15 @@ def write_latest_stats(journal_path: Path) -> tuple[Path, Path, Path]:
     md_text = render_markdown(now_utc, payload)
     readable_text = render_readable_journal(now_utc, entries)
     out_dir = journal_path.parent
-    json_path = out_dir / "trade_journal_stats_latest.json"
     md_path = out_dir / "trade_journal_stats_latest.md"
     readable_path = out_dir / "trade_journal_readable.md"
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 仅保留 Markdown 统计文件；若历史 JSON 存在则清理掉。
+    json_path = out_dir / "trade_journal_stats_latest.json"
+    if json_path.exists():
+        json_path.unlink()
     md_path.write_text(md_text, encoding="utf-8")
     readable_path.write_text(readable_text, encoding="utf-8")
-    return json_path, md_path, readable_path
+    return md_path, readable_path
 
 
 def main() -> int:

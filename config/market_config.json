@@ -30,6 +30,14 @@
       "tags": ["液冷", "数据中心热管理", "汽车热管理", "机器人"]
     },
     {
+      "symbol": "000876.SZ",
+      "name": "新希望",
+      "market": "CN",
+      "data_symbol": "000876.SZ",
+      "research_keyword": "新希望",
+      "tags": ["农业", "养殖", "饲料"]
+    },
+    {
       "symbol": "AAPL",
       "name": "苹果",
       "market": "US",
@@ -68,6 +76,30 @@
       "data_symbol": "Au9999",
       "research_keyword": "黄金",
       "tags": ["贵金属", "黄金"]
+    },
+    {
+      "symbol": "BTC_USDT",
+      "name": "Bitcoin",
+      "market": "CRYPTO",
+      "data_symbol": "BTC_USDT",
+      "research_keyword": "比特币",
+      "tags": ["加密货币", "BTC", "数字资产"]
+    },
+    {
+      "symbol": "SOL_USDT",
+      "name": "Solana",
+      "market": "CRYPTO",
+      "data_symbol": "SOL_USDT",
+      "research_keyword": "Solana",
+      "tags": ["加密货币", "SOL", "公链"]
+    },
+    {
+      "symbol": "ETH_USDT",
+      "name": "Ethereum",
+      "market": "CRYPTO",
+      "data_symbol": "ETH_USDT",
+      "research_keyword": "以太坊",
+      "tags": ["加密货币", "ETH", "数字资产"]
     }
   ]
 }

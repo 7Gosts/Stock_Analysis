@@ -8,13 +8,11 @@ Gold API（gold-api.cn）REST 封装：品种列表、历史日线 OHLCV。
 
 from __future__ import annotations
 
-import json
 import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from tools.goldapi.client import fetch_history, fetch_varieties
 
 _VARIETIES_CACHE: list[dict[str, Any]] | None = None
 
@@ -34,29 +32,9 @@ def gold_api_appkey() -> str:
     ).strip()
 
 
-def _http_get_json(url: str, *, timeout: float = 45.0) -> Any:
-    req = Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Stock_Analysis/1.0 (+https://github.com)",
-        },
-    )
-    with urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-    return json.loads(raw)
-
-
 def fetch_gold_varieties() -> list[dict[str, Any]]:
     """GET /api/v1/gold/varieties（无需 appkey）。"""
-    url = f"{gold_api_base()}/api/v1/gold/varieties"
-    payload = _http_get_json(url)
-    if str(payload.get("success")) != "1":
-        raise ValueError(f"gold varieties 失败: {payload}")
-    result = payload.get("result")
-    if not isinstance(result, list):
-        return []
-    return result
+    return fetch_varieties(base_url=gold_api_base())
 
 
 def _get_varieties_cached() -> list[dict[str, Any]]:
@@ -255,19 +233,15 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
     end_d = datetime.now(timezone.utc).date()
     start_d = end_d - timedelta(days=span_days)
 
-    params = {
-        "goldid": gold_id,
-        "start_date": start_d.isoformat(),
-        "end_date": end_d.isoformat(),
-        "limit": str(min(max(lim + 200, 400), 5000)),
-        "appkey": appkey,
-    }
-    url = f"{gold_api_base()}/api/v1/gold/history?{urlencode(params)}"
-    payload = _http_get_json(url)
-    if str(payload.get("success")) != "1":
-        raise ValueError(f"gold history 失败: {payload.get('msgId')} {payload.get('msg')} body={payload}")
-
-    rows = _rows_from_history_result(payload.get("result"))
+    result = fetch_history(
+        base_url=gold_api_base(),
+        appkey=appkey,
+        gold_id=gold_id,
+        start_date=start_d.isoformat(),
+        end_date=end_d.isoformat(),
+        limit=min(max(lim + 200, 400), 5000),
+    )
+    rows = _rows_from_history_result(result)
     rows = [r for r in rows if r["open"] > 0 and r["high"] > 0 and r["low"] > 0 and r["close"] > 0]
     rows = _rollup_to_daily_bars(rows)
     rows.sort(key=lambda x: x["time"])

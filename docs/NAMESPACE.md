@@ -8,10 +8,11 @@
 
 | 目录 | 包名 | 一句话 |
 |------|------|--------|
-| `analysis/` | `analysis` | 拉行情、算指标、写报告片段、台账统计、贵金属 Gold API |
+| `analysis/` | `analysis` | 业务分析层：provider 分发与归一化、指标计算、报告片段、台账统计 |
 | `intel/` | `intel` | 研报客：搜索/解析/落盘（调 `tools/yanbaoke`） |
 | `market_data/` | `market_data` | **预留**：板块/概念/资金流等结构化数据（当前无业务代码） |
 | `cli/` | `cli` | 命令行编排（非业务逻辑堆积处） |
+| `tools/` | `tools`（目录） | 外部 API / 脚本实现层：行情 provider 客户端与研报 Node 脚本 |
 
 与 **`tools/yanbaoke/`** 区分：`intel` 是 **Python 封装**；`tools/yanbaoke` 是 **Node 脚本 + SKILL**。
 
@@ -21,10 +22,12 @@
 
 | 文件 | 职责 |
 |------|------|
-| `price_feeds.py` | 统一入口 `fetch_ohlcv(provider, …)`：tickflow / akshare / goldapi |
-| `kline_metrics.py` | SMA/Fib/趋势、威科夫背景、123 结构、`structure_filters_v1`、`time_stop_v1`、`mtf_v1`（辅周期可选）、`compute_ohlc_stats`、`format_*` 报告片段 |
+| `price_feeds.py` | 统一入口 `fetch_ohlcv(provider, …)`：仅做 symbol/interval 适配、provider 分发与 OHLCV 归一化 |
+| `kline_metrics.py` | 股票/通用分析主干：SMA/Fib/趋势、威科夫背景、123 结构、`structure_filters_v1`、`time_stop_v1`、`mtf_v1`（辅周期可选）、`compute_ohlc_stats`、`format_*` 报告片段 |
+| `crypto_kline_analysis.py` | CryptoTradeDesk 风格增强层：复用 `kline_metrics` 并叠加 MA 8/21/55 与 regime 字段（读 `config/analysis_defaults.yaml`） |
 | `ledger_stats.py` | 读 `trade_journal.jsonl`，生成周/月统计、`breakdown_*d`（按 status / wyckoff_bias、时间止损过期挂单数）、可读 Markdown |
-| `gold_api.py` | Gold API（gold-api.cn）HTTP：品种解析、`fetch_ohlcv_goldapi` |
+| `gold_api.py` | 贵金属辅助：品种映射、日线聚合等（不承载 provider 级 HTTP 请求实现） |
+| `trade_journal.py` | 台账状态机：`watch/pending -> filled/expired`、`filled -> closed(tp/sl)/float_*`，以及去重辅助 |
 
 ---
 
@@ -40,7 +43,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `stock_analysis.py` | 唯一主 CLI：读 `config/market_config.json`、循环标的、可选辅周期 K 线（`--mtf-interval` / `--no-mtf`）、调 `analysis` + 可选 `intel`、写 `output/` |
+| `stock_analysis.py` | 唯一主 CLI：读 `config/market_config.json`、循环标的、可选辅周期 K 线（`--mtf-interval` / `--no-mtf`）、按 `--analysis-style` 在 stock/crypto 引擎间切换、调 `analysis` + 可选 `intel`、写 `output/` |
 
 ---
 
@@ -48,10 +51,22 @@
 
 | 路径 | 职责 |
 |------|------|
-| `config/market_config.json` | 标的列表、`default_symbols`、`market` / `data_symbol`；可选 `tags`（字符串数组，用于报告/总览/台账） |
+| `config/market_config.json` | 标的列表、`default_symbols`、`market` / `data_symbol`；含 `CRYPTO`（如 `BTC_USDT`）与可选 `tags` |
+| `config/analysis_defaults.yaml` | crypto 分析默认参数（MA 8/21/55、分形参数、RR 阈值等） |
 | `tools/yanbaoke/scripts/search.mjs` | 研报客搜索（无 Key 可搜） |
 | `tools/yanbaoke/scripts/download.mjs` | 研报下载（需 Key） |
 | `tools/yanbaoke/SKILL.md` | 研报客技能说明 |
+
+---
+
+## 行情 Provider 客户端（`tools/`）
+
+| 路径 | 职责 |
+|------|------|
+| `tools/tickflow/client.py` | tickflow 外部 API 调用、超时与基础异常封装 |
+| `tools/gateio/client.py` | gateio 外部 API 调用、超时与基础异常封装 |
+| `tools/goldapi/client.py` | goldapi 外部 API 调用、超时与基础异常封装 |
+| `tools/common/errors.py` | ProviderError / ParseError / RateLimitError 等通用错误类型 |
 
 ---
 

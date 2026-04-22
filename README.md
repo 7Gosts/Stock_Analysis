@@ -1,6 +1,6 @@
 # Stock_Analysis
 
-面向 **A 股 / 美股 / 港股（依数据源）** 与 **贵金属（Gold API）** 的 K 线分析 CLI：拉 OHLCV → 算结构指标 → 生成 Markdown / JSON；可选叠加 **研报客** 检索。风格接近 `CryptoTradeDesk`。
+面向 **A 股 / 美股 / 港股（依数据源）**、**加密货币（Gate.io）** 与 **贵金属（Gold API）** 的 K 线分析 CLI：拉 OHLCV → 算结构指标 → 生成 Markdown / JSON；可选叠加 **研报客** 检索。风格接近 `CryptoTradeDesk`。
 
 **合规**：仅技术分析与程序化演示，不构成投资建议。
 
@@ -17,7 +17,8 @@
 
 3. **跑一条默认简报**（读取 `config/market_config.json` 里的 `default_symbols`，数据源默认 `tickflow`）  
    `python cli/stock_analysis.py --market-brief --report-only --out-dir output`  
-   - **多周期**：`--mtf-interval auto`（默认）：`1d` 主图下 tickflow 有 Key 时辅 `4h`，免费档辅 `1w`；akshare 辅 `1wk`。`--no-mtf` 关闭。
+  - **多周期**：`--mtf-interval auto`（默认）：`1d` 主图下 tickflow 辅 `1w`；gateio 辅 `4h`；goldapi 辅 `1w`。`--no-mtf` 关闭。
+  - **分析引擎**：`--analysis-style auto`（默认，`CRYPTO`/`gateio` 自动走 crypto 风格）；可手动指定 `stock` 或 `crypto`。
    - **结构过滤 / 时间止损**：写入 `ai_overview.json` 的 `stats` 与台账 `trade_journal.jsonl`（字段含 `structure_filter_flags`、`time_stop_deadline_utc`、`lifecycle_v1`、`mtf_aligned` 等）。
 
 4. **看产物**（`--out-dir` 下；会话目录名为 **UTC 日期**）  
@@ -40,10 +41,11 @@
 | 路径 | 职责 |
 |------|------|
 | `cli/` | 唯一编排入口：`stock_analysis.py`（参数、循环标的、写 `output/`） |
-| `analysis/` | 行情与指标内核：见 `docs/NAMESPACE.md`（`price_feeds`、`kline_metrics`、`ledger_stats`、`gold_api`） |
+| `analysis/` | 业务分析内核：`price_feeds` 仅做 provider 分发与 OHLCV 归一化，指标/台账在本层（见 `docs/NAMESPACE.md`） |
 | `intel/` | 研报情报：`yanbaoke_client.py`（调 Node 搜索、解析、落盘） |
 | `market_data/` | **预留**：板块/概念成分、资金流等结构化数据（当前无实现） |
 | `config/` | `market_config.json`（标的、`default_symbols`、`market` / `data_symbol`） |
+| `tools/tickflow|gateio|goldapi/` | 行情 provider 客户端：外部 API 请求、超时与基础异常封装 |
 | `tools/yanbaoke/` | 研报客 Node 脚本与 `SKILL.md` |
 | `output/` | 运行产物（不入版本控制意义下的「工作区」，建议保持 gitignore） |
 
@@ -55,11 +57,17 @@ flowchart LR
   CFG[config/market_config.json]
   DP[analysis.price_feeds]
   AE[analysis.kline_metrics]
+  TF[tools.tickflow.client]
+  GI[tools.gateio.client]
+  GA[tools.goldapi.client]
   YB[intel.yanbaoke_client]
   NODE[tools/yanbaoke]
   OUT[output/]
   CLI --> CFG
   CLI --> DP
+  DP --> TF
+  DP --> GI
+  DP --> GA
   DP --> AE
   CLI --> YB
   YB --> NODE
@@ -73,7 +81,7 @@ flowchart LR
 
 | 你想做… | 优先改 |
 |----------|--------|
-| 新行情源 / 新证券或商品代码规则 | `analysis/price_feeds.py`（必要时在 `analysis/` 下新增模块再接入） |
+| 新行情源 / 新证券或商品代码规则 | `tools/<provider>/client.py` + `analysis/price_feeds.py`（前者实现 API，后者做分发与归一化） |
 | 新指标、报告字段、Fib/威科夫逻辑 | `analysis/kline_metrics.py` |
 | 台账统计口径 | `analysis/ledger_stats.py` |
 | 新 CLI 子命令或参数 | `cli/stock_analysis.py` |
@@ -85,7 +93,7 @@ flowchart LR
 
 ## 能力与指标（v1）
 
-- **数据源（`--provider`）**：`tickflow`（默认）/ `akshare` / `goldapi`
+- **数据源（`--provider`）**：`tickflow`（默认）/ `gateio` / `goldapi`
 - **输出**：简报、总览 JSON、全文报告；可选研报检索目录；台账 `trade_journal.jsonl` 及统计快照、可读版  
 - **指标**：SMA20/60、近 1/5 根涨跌幅、近窗 swing 高/低、Fib 区间、趋势标签（偏多/偏空/震荡等）  
 - **交易辅助**：威科夫背景过滤（`long_only` / `short_only` / `neutral`）+ 123 结构（P1/P2/P3、触发/止损/TP）
@@ -137,8 +145,24 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 | provider | 说明 | 环境变量（摘要） |
 |----------|------|------------------|
 | `tickflow` | 默认；无 Key 可走免费日线 | 可选 `TICKFLOW_API_KEY` 用完整服务 |
-| `akshare` | A 股 / 美股日线等 | 一般无需 token |
-| `goldapi` | [Gold API](https://gold-api.cn) 贵金属 | 默认 key 在 `analysis/gold_api.py`；可用 **`GOLD_API_APPKEY`** / **`GOLD_API_KEY`** 覆盖；可选 **`GOLD_API_BASE`** |
+| `gateio` | 加密货币现货 K 线（如 `BTC_USDT`） | 无需 Key（公共行情接口） |
+| `goldapi` | [Gold API](https://gold-api.cn) 贵金属 | provider 客户端在 `tools/goldapi/client.py`；可用 **`GOLD_API_APPKEY`** / **`GOLD_API_KEY`** 覆盖；可选 **`GOLD_API_BASE`** |
+
+---
+
+## 外部 API 总览
+
+当前项目接入 **4 类外部 API 能力**（其中行情源 3 类 + 研报情报 1 类）：
+
+- **行情 API（3）**：`tickflow`、`gateio`、`goldapi`
+- **情报 API（1）**：`yanbaoke`（研报客）
+
+| 能力分类 | 名称 | 默认是否启用 | 是否需要 Key | 典型触发命令 |
+|---|---|---|---|---|
+| 行情 | `tickflow` | 是（`--provider` 默认） | 可选（无 Key 走免费域名） | `python cli/stock_analysis.py --market-brief --report-only --out-dir output` |
+| 行情 | `gateio` | 否（需显式指定） | 否 | `python cli/stock_analysis.py --provider gateio --symbol BTC_USDT --interval 1d --report-only --out-dir output` |
+| 行情 | `goldapi` | 否（需显式指定） | 是（内置默认 key，可被环境变量覆盖） | `python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --report-only --out-dir output` |
+| 研报情报 | `yanbaoke` | 否（需 `--with-research`） | 搜索否 / 下载是 | `python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5` |
 
 ---
 
