@@ -95,6 +95,19 @@ def _to_local_iso(dt: datetime) -> str:
     return dt.astimezone().isoformat()
 
 
+def _output_market_bucket(assets_map: dict[str, dict[str, Any]], selected: list[str]) -> str:
+    """输出目录的 market 分桶：同一批次若 market 不一致，落到 MIXED，避免覆盖与歧义。"""
+    markets: list[str] = []
+    for s in selected:
+        it = assets_map.get(s) or {}
+        mk = str(it.get("market") or "UNK").strip().upper() or "UNK"
+        markets.append(mk)
+    uniq = sorted(set(markets))
+    if len(uniq) == 1:
+        return uniq[0]
+    return "MIXED"
+
+
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -384,9 +397,11 @@ def main() -> int:
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone()
     out_base = Path(args.out_dir).resolve()
-    session_dir = out_base / _local_day(now_local)
+    provider_bucket = str(args.provider or "tickflow").strip().lower() or "tickflow"
+    market_bucket = _output_market_bucket(assets_map, selected)
+    session_dir = out_base / provider_bucket / market_bucket / _local_day(now_local)
     session_dir.mkdir(parents=True, exist_ok=True)
-    research_dir = out_base / "research" / _local_day(now_local)
+    research_dir = out_base / "research" / provider_bucket / market_bucket / _local_day(now_local)
 
     cards: list[str] = []
     briefs: list[str] = []
