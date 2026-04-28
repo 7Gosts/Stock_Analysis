@@ -100,6 +100,22 @@
       "data_symbol": "ETH_USDT",
       "research_keyword": "以太坊",
       "tags": ["加密货币", "ETH", "数字资产"]
+    },
+    {
+      "symbol": "600115.SH",
+      "name": "东方航空",
+      "market": "CN",
+      "data_symbol": "600115.SH",
+      "research_keyword": "东方航空",
+      "tags": ["航空", "交通运输", "国企"]
+    },
+    {
+      "symbol": "000625.SZ",
+      "name": "长安汽车",
+      "market": "CN",
+      "data_symbol": "000625.SZ",
+      "research_keyword": "长安汽车",
+      "tags": ["汽车", "新能源车", "国企"]
     }
   ]
 }
