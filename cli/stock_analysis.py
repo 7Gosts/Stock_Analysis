@@ -238,6 +238,7 @@ def build_trade_journal_entry(
             str(interval or "1d"),
             "tactical",
             direction,
+            now_utc.isoformat(),
         ]
     )
     idea_id = hashlib.sha1(stable_key.encode("utf-8")).hexdigest()[:12]
