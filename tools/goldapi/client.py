@@ -41,6 +41,28 @@ def fetch_varieties(*, base_url: str) -> list[dict[str, Any]]:
     return result
 
 
+def _kline_auth_query_name(url: str) -> str:
+    return "apikey" if "api.gold-api.cn" in (url or "").lower() else "appkey"
+
+
+def fetch_kline(*, url: str, symbol: str, period: str, limit: int, auth_key: str) -> Any:
+    """GET K 线：symbol + period（分钟，日线 1440）+ limit + 鉴权。"""
+    qn = _kline_auth_query_name(url)
+    params = {
+        "symbol": symbol,
+        "period": str(period),
+        "limit": str(int(limit)),
+        qn: auth_key,
+    }
+    full = f"{url.rstrip('/')}?{urlencode(params)}"
+    payload = http_get_json(full)
+    if isinstance(payload, dict) and str(payload.get("success")) == "0":
+        raise ProviderError(
+            f"gold kline 失败: {payload.get('msgId')} {payload.get('msg')} body={payload}"
+        )
+    return payload
+
+
 def fetch_history(*, base_url: str, appkey: str, gold_id: str, start_date: str, end_date: str, limit: int) -> Any:
     params = {
         "goldid": gold_id,

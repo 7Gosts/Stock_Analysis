@@ -168,11 +168,10 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 
 ## 贵金属（Gold API）
 
-- 接口形态：`GET .../api/v1/gold/history`，查询参数含 **`goldid`**、**`start_date`**、**`end_date`**、**`limit`**、**`appkey`**（小写）。  
-- **品种代码**：可用 `Au9999`、`AuT+D` 等，由 `GET /api/v1/gold/varieties`（无需 key）映射到 `goldid`；也可直接在配置里写 `goldid`（如 `1053`、`hf_XAU`）。  
-- CLI 侧 **`goldapi` + `interval=1d`**：对返回的细粒度 K 线按**日历日**聚合成日线后再算 SMA/Fib。  
-- **配额**：以 Gold API 套餐为准；`--market-brief` 多标的时注意请求次数。  
-- **公开仓库**：建议删除代码内默认 key，仅保留环境变量注入。
+- **默认日线 K 线**：``GET {GOLD_API_BASE}/api/v1/kline``，``period=1440``（分钟 = 1 日）、``symbol``、``limit``、鉴权（``api.gold-api.cn`` 用 ``apikey``，其余与 history 一样用 ``appkey``，由代码按主机名选择）。可用 **`GOLD_API_KLINE_URL`** 覆盖为完整 K 线 URL；可选 **`GOLD_API_KLINE_PERIOD`** 改日线分钟数（默认 **1440**）。失败或有效根数不足时回退 **history**。
+- **回退**：``GET .../api/v1/gold/history``（``goldid``、日期区间、``limit``、``appkey``）；若返回细粒度 K 线，仍按**日历日**聚合成日线再算指标。  
+- **品种**：`Au9999` / `goldid` 等，见 `GET /api/v1/gold/varieties`。CLI：**`goldapi` + `interval=1d`**。  
+- **配额 / 公开仓库**：套餐为准；建议生产环境仅用环境变量注入 key。
 
 ---
 

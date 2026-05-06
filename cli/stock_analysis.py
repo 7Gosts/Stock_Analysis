@@ -123,10 +123,66 @@ def _upsert_prepend_text(path: Path, content: str, *, sep: str = "\n\n---\n\n") 
     path.write_text(merged, encoding="utf-8")
 
 
+def _overview_item_key(it: Any) -> tuple[str, str, str]:
+    """用于跨次运行合并：同标的+周期+数据源视为同一槽位。"""
+    if not isinstance(it, dict):
+        return ("", "", "")
+    sym = str(it.get("symbol") or "").strip().upper()
+    iv = str(it.get("interval") or "").strip()
+    pv = str(it.get("provider") or "").strip().lower()
+    return (sym, iv, pv)
+
+
+def _merge_overview_items(existing: list[Any], incoming: list[Any]) -> list[dict[str, Any]]:
+    """按槽位合并：本轮结果覆盖同键旧项；未出现在本轮的标的保留原顺序跟在已更新项之后。"""
+    inc_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for it in incoming:
+        if isinstance(it, dict):
+            inc_by_key[_overview_item_key(it)] = it
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for it in existing:
+        if not isinstance(it, dict):
+            continue
+        k = _overview_item_key(it)
+        if k in inc_by_key:
+            out.append(inc_by_key[k])
+            seen.add(k)
+        else:
+            out.append(it)
+    for it in incoming:
+        if not isinstance(it, dict):
+            continue
+        k = _overview_item_key(it)
+        if k not in seen:
+            out.append(it)
+            seen.add(k)
+    return out
+
+
 def _write_overview_latest(path: Path, payload: dict[str, Any]) -> None:
-    """ai_overview.json 仅保留本次最新快照，不保留 _history。"""
+    """写入 ai_overview.json；若同会话目录已有文件则按 items 槽位合并后写回（非 JSONL 追加）。
+
+    合并键为 (symbol, interval, provider)，避免多次单标的运行互相覆盖。不保留 _history。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
     payload.pop("_history", None)
+    items_in = payload.get("items")
+    if not isinstance(items_in, list):
+        items_in = []
+    payload["items"] = items_in
+
+    if path.is_file():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = None
+        if isinstance(old, dict):
+            old_items = old.get("items")
+            if isinstance(old_items, list) and old_items:
+                payload["items"] = _merge_overview_items(old_items, items_in)
+
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

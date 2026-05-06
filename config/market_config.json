@@ -110,12 +110,28 @@
       "tags": ["航空", "交通运输", "国企"]
     },
     {
+      "symbol": "600958.SH",
+      "name": "东方证券",
+      "market": "CN",
+      "data_symbol": "600958.SH",
+      "research_keyword": "东方证券",
+      "tags": ["券商", "证券", "金融"]
+    },
+    {
       "symbol": "000625.SZ",
       "name": "长安汽车",
       "market": "CN",
       "data_symbol": "000625.SZ",
       "research_keyword": "长安汽车",
       "tags": ["汽车", "新能源车", "国企"]
+    },
+    {
+      "symbol": "603690.SH",
+      "name": "至纯科技",
+      "market": "CN",
+      "data_symbol": "603690.SH",
+      "research_keyword": "至纯科技",
+      "tags": ["半导体设备", "高纯工艺", "湿法清洗"]
     }
   ]
 }

@@ -1,9 +1,8 @@
 """
-Gold API（gold-api.cn）REST 封装：品种列表、历史日线 OHLCV。
+Gold API：品种列表、贵金属 OHLCV。
 
-鉴权：URL 查询参数 `appkey`。优先使用环境变量 GOLD_API_APPKEY / GOLD_API_KEY，
-未设置时使用模块内默认 key（便于私有仓库直接跑；公开仓库建议改为仅环境变量）。
-文档基址默认 https://gold-api.cn ，可用 GOLD_API_BASE 覆盖。
+默认按日线拉 K 线（``/api/v1/kline`` + ``period=1440``），失败再回退 ``/gold/history``。
+鉴权：``appkey`` / ``apikey``（见 ``tools.goldapi.client``）。基址 ``GOLD_API_BASE``，密钥 ``GOLD_API_APPKEY``。
 """
 
 from __future__ import annotations
@@ -12,7 +11,8 @@ import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from tools.goldapi.client import fetch_history, fetch_varieties
+from tools.common.errors import ParseError, ProviderError, RateLimitError
+from tools.goldapi.client import fetch_history, fetch_kline, fetch_varieties
 
 _VARIETIES_CACHE: list[dict[str, Any]] | None = None
 
@@ -44,6 +44,10 @@ def _get_varieties_cached() -> list[dict[str, Any]]:
     return _VARIETIES_CACHE
 
 
+# 日线 K：period 为分钟，厂商约定 1440 = 1 日。
+GOLDAPI_PERIOD_DAILY_MINUTES = "1440"
+
+
 def resolve_gold_id(ticker: str) -> str:
     """
     将 data_symbol 解析为接口 goldid：
@@ -63,6 +67,30 @@ def resolve_gold_id(ticker: str) -> str:
             if gid:
                 return gid
     raise ValueError(f"未找到贵金属品种映射: {ticker!r}（请使用 gold-api 控制台 goldid，如 1053 / hf_XAU）")
+
+
+def resolve_kline_symbol(ticker: str) -> str:
+    """K 线 ``symbol``：品种代码或从 goldId 反查 variety。"""
+    raw = ticker.strip()
+    if not raw:
+        raise ValueError("贵金属 ticker 为空")
+    if raw.isdigit() or raw.startswith(("hf_", "nf_")):
+        gid = raw
+        for row in _get_varieties_cached():
+            if str(row.get("goldId") or "").strip() == gid:
+                v = str(row.get("variety") or "").strip()
+                if v:
+                    return v
+        raise ValueError(f"无法将 goldId {gid!r} 映射为 K 线 symbol（请检查品种表）")
+    return raw
+
+
+def gold_api_kline_url() -> str:
+    """日线 K 默认 ``{GOLD_API_BASE}/api/v1/kline``；可用 ``GOLD_API_KLINE_URL`` 覆盖为完整 URL。"""
+    u = (os.getenv("GOLD_API_KLINE_URL") or "").strip().rstrip("/")
+    if u:
+        return u
+    return f"{gold_api_base()}/api/v1/kline"
 
 
 def _parse_dt_any(s: str) -> datetime:
@@ -210,14 +238,25 @@ def _rows_from_history_result(result: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _finalize_gold_rows(rows: list[dict[str, Any]], *, lim: int) -> list[dict[str, Any]]:
+    rows = [r for r in rows if r["open"] > 0 and r["high"] > 0 and r["low"] > 0 and r["close"] > 0]
+    rows = _rollup_to_daily_bars(rows)
+    rows.sort(key=lambda x: x["time"])
+    if len(rows) < 30:
+        raise ValueError(
+            f"goldapi 返回有效 K 线不足 30 根（实际 {len(rows)}），请检查 goldid、日期区间或套餐额度"
+        )
+    return rows[-lim:]
+
+
 def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) -> list[dict[str, Any]]:
     """
-    使用 GET /api/v1/gold/history 拉取日线 K 线。
+    贵金属日线 OHLCV：默认 ``GET {GOLD_API_BASE}/api/v1/kline`` + ``period=1440``；
+    失败则回退 ``/gold/history``（细粒度再按日聚合）。
 
-    - interval 仅支持 1d（上海金/外盘日线口径由数据源决定）。
-    - ticker：配置里的 data_symbol，可为 goldId（1053、hf_XAU）或品种代码（Au9999）。
+    ticker：``data_symbol``（Au9999）或 goldId（1053）；interval 仅 ``1d``。
     """
-    _ = market  # PM / CN 等均可，由上层资产描述
+    _ = market
     iv = (interval or "1d").lower()
     if iv not in {"1d", "1day"}:
         raise ValueError("goldapi 暂仅支持日线 interval=1d（历史接口按日期）")
@@ -227,12 +266,27 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
         raise ValueError("goldapi 缺少 appkey：请设置 GOLD_API_APPKEY 或在 gold_api.py 配置默认 key")
 
     gold_id = resolve_gold_id(ticker)
+    sym = resolve_kline_symbol(ticker)
     lim = max(30, min(int(limit), 5000))
-    # 多要一些自然日，覆盖节假日与断档
+    period = (os.getenv("GOLD_API_KLINE_PERIOD") or GOLDAPI_PERIOD_DAILY_MINUTES).strip() or GOLDAPI_PERIOD_DAILY_MINUTES
+    kline_limit = min(max(lim + 50, 120), 5000)
+
+    try:
+        payload = fetch_kline(
+            url=gold_api_kline_url(),
+            symbol=sym,
+            period=period,
+            limit=kline_limit,
+            auth_key=appkey,
+        )
+        rows = _rows_from_history_result(payload)
+        return _finalize_gold_rows(rows, lim=lim)
+    except (ProviderError, ParseError, RateLimitError, ValueError):
+        pass
+
     span_days = min(int(lim * 2.2) + 120, 4000)
     end_d = datetime.now(timezone.utc).date()
     start_d = end_d - timedelta(days=span_days)
-
     result = fetch_history(
         base_url=gold_api_base(),
         appkey=appkey,
@@ -242,11 +296,4 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
         limit=min(max(lim + 200, 400), 5000),
     )
     rows = _rows_from_history_result(result)
-    rows = [r for r in rows if r["open"] > 0 and r["high"] > 0 and r["low"] > 0 and r["close"] > 0]
-    rows = _rollup_to_daily_bars(rows)
-    rows.sort(key=lambda x: x["time"])
-    if len(rows) < 30:
-        raise ValueError(
-            f"goldapi 返回有效 K 线不足 30 根（实际 {len(rows)}），请检查 goldid、日期区间或套餐额度"
-        )
-    return rows[-lim:]
+    return _finalize_gold_rows(rows, lim=lim)
