@@ -1,5 +1,14 @@
 # 跨资产默认参数
+# 写入 trade_journal.jsonl 前的最小盈亏比（与 CryptoTradeDesk 口径一致：|TP1-entry|/|entry-stop|）
 min_journal_rr: 1.2
+# 可选质量门：enabled 为 false 时仅 RR 门槛生效（默认保守关闭）
+journal_quality:
+  enabled: false
+  skip_structure_flags: []
+  require_mtf_align_for_crypto_only: false
+  swing_journal_enabled: true
+  swing_min_bars: 55
+  swing_require_wyckoff_aligned: false
 journal_action_thresholds:
   worth_doing_rr: 1.45
   observe_rr: 1.2

@@ -13,36 +13,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
+from config.runtime_config import get_journal_action_thresholds
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_analysis_config() -> dict[str, Any]:
-    cfg_path = _REPO_ROOT / "config" / "analysis_defaults.yaml"
-    if not cfg_path.is_file():
-        return {}
-    try:
-        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-_CFG = _load_analysis_config()
-
-
 def _action_thresholds() -> tuple[float, float]:
-    node = _CFG.get("journal_action_thresholds")
-    if not isinstance(node, dict):
-        return 1.45, 1.2
-    worth = node.get("worth_doing_rr")
-    observe = node.get("observe_rr")
-    worth_v = float(worth) if isinstance(worth, (int, float)) else 1.45
-    observe_v = float(observe) if isinstance(observe, (int, float)) else 1.2
-    if worth_v < observe_v:
-        worth_v = observe_v
-    return worth_v, observe_v
+    return get_journal_action_thresholds()
 
 
 def parse_iso_utc(ts: str | None) -> datetime | None:

@@ -1,35 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import os
-from pathlib import Path
 from typing import Any
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-_DEFAULT_CFG_PATH = _SCRIPT_DIR.parent / "config" / "analysis_defaults.yaml"
-
-
-def _load_analysis_config() -> dict[str, Any]:
-    cfg_path = os.getenv("STOCK_ANALYSIS_CRYPTO_CONFIG", "").strip()
-    path = Path(cfg_path).expanduser().resolve() if cfg_path else _DEFAULT_CFG_PATH
-    if not path.is_file():
-        return {}
-    try:
-        import yaml  # type: ignore
-    except Exception:
-        return {}
-    try:
-        obj = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return obj if isinstance(obj, dict) else {}
-
-
-_CFG = _load_analysis_config()
+from config.runtime_config import get_ma_system
 
 
 def _ma_triplet_for_market(market: str | None) -> tuple[int, int, int]:
-    ms = _CFG.get("ma_system") if isinstance(_CFG, dict) else None
+    ms = get_ma_system()
     if not isinstance(ms, dict):
         return (8, 21, 55)
     m = str(market or "").upper()

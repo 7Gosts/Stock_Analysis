@@ -1,6 +1,6 @@
 # 命名空间与文件速查
 
-协作时建议：**先看本页**，再打开具体实现。Python 包名与磁盘目录一致（仓库根须在 `sys.path` 中，由 `cli/stock_analysis.py` 注入）。
+协作时建议：**新对话 / 新 Agent 窗口**先看仓库根目录 **`AGENTS.md`**（角色边界与 **§0.2 路由**：叙事 vs K 线数据源），再翻本速查表与具体实现。Python 包名与磁盘目录一致（仓库根须在 `sys.path` 中，由 `cli/stock_analysis.py` 注入）。
 
 ---
 
@@ -9,10 +9,12 @@
 | 目录 | 包名 | 一句话 |
 |------|------|--------|
 | `analysis/` | `analysis` | 业务分析层：provider 分发与归一化、指标计算、报告片段、台账统计 |
+| `app/` | `app` | 应用编排层：流程调度、报告写入、台账服务 |
 | `intel/` | `intel` | 研报客：搜索/解析/落盘（调 `tools/yanbaoke`） |
 | `market_data/` | `market_data` | **预留**：板块/概念/资金流等结构化数据（当前无业务代码） |
 | `cli/` | `cli` | 命令行编排（非业务逻辑堆积处） |
 | `tools/` | `tools`（目录） | 外部 API / 脚本实现层：行情 provider 客户端与研报 Node 脚本 |
+| `config/` | `config` | 配置层：`market_config.json`、`analysis_defaults.yaml`、`runtime_config.py`（统一读取） |
 
 与 **`tools/yanbaoke/`** 区分：`intel` 是 **Python 封装**；`tools/yanbaoke` 是 **Node 脚本 + SKILL**。
 
@@ -28,6 +30,7 @@
 | `ledger_stats.py` | 读 `trade_journal.jsonl`，生成周/月统计、`breakdown_*d`（按 status / wyckoff_bias、时间止损过期挂单数）、可读 Markdown |
 | `gold_api.py` | 贵金属辅助：品种映射、日线聚合等（不承载 provider 级 HTTP 请求实现） |
 | `trade_journal.py` | 台账状态机：`watch/pending -> filled/expired`、`filled -> closed(tp/sl)/float_*`，以及去重辅助 |
+| `journal_policy.py` | 台账写入策略：`min_journal_rr`、可选 `journal_quality`、加密 `swing` 候选构造（与 CryptoTradeDesk 思路对齐） |
 
 ---
 
@@ -43,7 +46,17 @@
 
 | 文件 | 职责 |
 |------|------|
-| `stock_analysis.py` | 唯一主 CLI：读 `config/market_config.json`、循环标的、可选辅周期 K 线（`--mtf-interval` / `--no-mtf`）、按 `--analysis-style` 在 stock/crypto 引擎间切换、调 `analysis` + 可选 `intel`、写 `output/` |
+| `stock_analysis.py` | 薄入口 CLI：参数解析后调用 `app.orchestrator.run(args)` |
+
+---
+
+## `app/` 内文件
+
+| 文件 | 职责 |
+|------|------|
+| `orchestrator.py` | 主流程编排：选标的、拉主/辅周期、调分析引擎、组装 overview 与候选台账 |
+| `report_writer.py` | 报告与总览写入：同日 prepend、`ai_overview` 槽位合并、历史时间戳文件清理 |
+| `journal_service.py` | 台账服务：先更新旧条目再追加新候选（含 RR/质量门控）并刷新统计文件 |
 
 ---
 
@@ -74,8 +87,9 @@
 
 | 路径 | 内容 |
 |------|------|
-| `output/<UTC日期>/` | `ai_brief.md`、`ai_overview.json`、`full_report.md` |
-| `output/research/<UTC日期>/` | 研报搜索落盘的 `*_research.json` / `*.md`（目录名仍为 `research`，表示「研报产物」） |
+| `output/<provider>/<market>/<本地日期>/` | `ai_brief.md`、`ai_overview.json`、`full_report.md`（K 线会话） |
+| `output/research/<provider>/<market>/<本地日期>/` | `stock_analysis.py --with-research` 研报落盘：`*_research.json` / `*_research.md` |
+| `output/research/<本地日期>/` | **仅** `cli/yb_search.py` 默认输出（无 provider/market 分桶） |
 | `output/trade_journal*.jsonl/md/json` | 台账与统计快照 |
 
 ---

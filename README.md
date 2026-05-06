@@ -21,11 +21,9 @@
   - **分析引擎**：`--analysis-style auto`（默认，`CRYPTO`/`gateio` 自动走 crypto 风格）；可手动指定 `stock` 或 `crypto`。
    - **结构过滤 / 时间止损**：写入 `ai_overview.json` 的 `stats` 与台账 `trade_journal.jsonl`（字段含 `structure_filter_flags`、`time_stop_deadline_utc`、`lifecycle_v1`、`mtf_aligned` 等）。
 
-4. **看产物**（`--out-dir` 下；会话目录名为 **UTC 日期**）  
-   - `output/<UTC日期>/ai_brief.md`  
-   - `output/<UTC日期>/ai_overview.json`  
-   - `output/<UTC日期>/full_report.md`  
-   启用 `--with-research` 时另有：`output/research/<UTC日期>/`
+4. **看产物**（`--out-dir` 下；会话目录为 **`output/<provider>/<market>/<本地日期>/`**，与 `cli/stock_analysis.py` 一致）  
+   - `ai_brief.md`、`ai_overview.json`、`full_report.md`（同目录）  
+   启用 `--with-research` 时另有：`output/research/<provider>/<market>/<本地日期>/`；**仅** `cli/yb_search.py` 时研报在 `output/research/<本地日期>/`
 
 5. **台账统计（独立命令）**  
    `python analysis/ledger_stats.py --journal output/trade_journal.jsonl`
@@ -40,11 +38,12 @@
 
 | 路径 | 职责 |
 |------|------|
-| `cli/` | 唯一编排入口：`stock_analysis.py`（参数、循环标的、写 `output/`） |
+| `cli/` | 薄入口：`stock_analysis.py`（仅参数解析与调度调用） |
+| `app/` | 应用编排层：`orchestrator.py`（流程）、`report_writer.py`（报告/总览写入）、`journal_service.py`（台账更新与入账） |
 | `analysis/` | 业务分析内核：`price_feeds` 仅做 provider 分发与 OHLCV 归一化，指标/台账在本层（见 `docs/NAMESPACE.md`） |
 | `intel/` | 研报情报：`yanbaoke_client.py`（调 Node 搜索、解析、落盘） |
 | `market_data/` | **预留**：板块/概念成分、资金流等结构化数据（当前无实现） |
-| `config/` | `market_config.json`（标的、`default_symbols`、`market` / `data_symbol`） |
+| `config/` | `market_config.json`（标的池）+ `analysis_defaults.yaml`（分析/台账阈值）+ `runtime_config.py`（统一配置读取入口） |
 | `tools/tickflow|gateio|goldapi/` | 行情 provider 客户端：外部 API 请求、超时与基础异常封装 |
 | `tools/yanbaoke/` | 研报客 Node 脚本与 `SKILL.md` |
 | `output/` | 运行产物（不入版本控制意义下的「工作区」，建议保持 gitignore） |
@@ -84,7 +83,7 @@ flowchart LR
 | 新行情源 / 新证券或商品代码规则 | `tools/<provider>/client.py` + `analysis/price_feeds.py`（前者实现 API，后者做分发与归一化） |
 | 新指标、报告字段、Fib/威科夫逻辑 | `analysis/kline_metrics.py` |
 | 台账统计口径 | `analysis/ledger_stats.py` |
-| 新 CLI 子命令或参数 | `cli/stock_analysis.py` |
+| 新 CLI 子命令或参数 | `cli/stock_analysis.py`（入口）+ `app/orchestrator.py`（编排逻辑） |
 | 新研报平台 | `intel/` + `tools/yanbaoke/`，再在 CLI 里接线 |
 | 板块/概念/官方成分股 | `market_data/`（新建模块，与 `analysis` 并列） |
 | 默认标的列表 | `config/market_config.json` |
@@ -107,6 +106,12 @@ pip install -r requirements.txt
 ```
 
 研报客搜索需要 **Node.js 18+**（例如 Ubuntu：`sudo apt install -y nodejs npm`）。
+
+测试建议（重构回归）：
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
 
 ---
 
@@ -177,7 +182,9 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 
 ## 台账与研报
 
-- **台账**：若跑出 123 候选，会追加 `output/trade_journal.jsonl`，并刷新 `trade_journal_stats_latest.md`、`trade_journal_readable.md`、`trade_journal_readable.csv`。
+- **台账定位**：`output/trade_journal.jsonl` 为 **结构快照**（Wyckoff 123 演算 + 可选加密 **swing** 第二轨），**不是**交易所成交回报；与 CryptoTradeDesk 类似，写入前会过滤 **过低盈亏比** 的候选。
+- **写入条件**：由 `cli/stock_analysis.py` 生成候选后，经 [`analysis/journal_policy.py`](analysis/journal_policy.py) 校验 **`min_journal_rr`**（默认见 [`config/analysis_defaults.yaml`](config/analysis_defaults.yaml)）及可选 **`journal_quality`**（默认关闭，仅 RR 生效）。加密 / `gateio` 在通过校验时还可追加 **`plan_type=swing`** 的波段候选（与 **`tactical`** 分槽，避免互相覆盖）。
+- **统计与可读表**：每次有新增或更新时刷新 `trade_journal_stats_latest.md`、`trade_journal_readable.md`、`trade_journal_readable.csv`；也可单独运行 `python analysis/ledger_stats.py --journal output/trade_journal.jsonl`。
 - **研报客**：`intel/yanbaoke_client.py` → `tools/yanbaoke/scripts/search.mjs`；**搜索**一般无需 Key，**下载**需 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
 
 ---
@@ -193,5 +200,5 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 ## AI / 自动化约定
 
 - **给人看的操作说明**：本 README。  
-- **给 Agent 的执行契约**：`.cursor/rules/stock-analysis-agent.mdc` + `AI_股票对话提示.md`（默认命令、读产物顺序、研报与资金流的边界说明）。  
+- **给 Agent 的执行契约（推荐顺序）**：根目录 **`AGENTS.md`**（新会话一页入口；含 **market-intel / crypto-kline / macro-kline** 三逻辑模式与 **§0.2 调度协议**）→ `AI_股票对话提示.md`（全文章节与公式）→ `.cursor/rules/stock-analysis-agent.mdc`（IDE 常驻规则）。  
 - **文件速查**：`docs/NAMESPACE.md`。

@@ -1,5 +1,7 @@
 # AI 股票对话提示（Stock_Analysis）v3.1
 
+**标准入口（新 Agent 窗口优先）**：仓库根目录 **`AGENTS.md`** — 一页清单，便于换窗口后快速恢复流程；**本文件**为完整条文与章节号（含 §3.1 情景化仓位公式、§6 复核时间、§7 台账边界等）。
+
 本文档与仓库目录对齐：`analysis/`（业务分析与归一化）、`tools/`（外部 API 实现层）、`intel/`（研报情报）、`market_data/`（预留板块/金融数据源）、`cli/`（编排入口）、`config/`（标的配置）。**速查表**：见仓库根目录 `docs/NAMESPACE.md`。
 
 ## 0.1) 首次对话 / 从其他 Agent 入口进来（强制顺序）
@@ -63,22 +65,42 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 
 实现口径：优先使用 `--interval 1d --mtf-interval auto`（由项目内默认规则自动映射辅周期）；若用户明确指定周期，则以用户指定为准。
 
+**调度与角色**：叙事 vs 技术的数据源边界、路由顺序见 **`AGENTS.md` §0.1～§0.2**；本节及以下仍约束读盘与写法。
+
 ## 2) 读取顺序（固定，不可颠倒）
 
-每次解读都按以下顺序读取：
+每次解读都按以下顺序读取技术产物（路径与 `cli/stock_analysis.py` 落盘一致）：
 
-1. `output/<UTC日期>/ai_brief.md`
-2. `output/<UTC日期>/ai_overview.json`
-3. `output/<UTC日期>/full_report.md`
+1. `output/<provider>/<market>/<本地日期>/ai_brief.md`
+2. `output/<provider>/<market>/<本地日期>/ai_overview.json`
+3. `output/<provider>/<market>/<本地日期>/full_report.md`
 
-若本轮启用了研报搜索，再补充读取（用于核对标题/链接/命中条数）：
+若本轮启用了研报搜索，再补充读取叙事产物（用于核对标题/链接/命中条数）：
 
-1. `output/research/<UTC日期>/*_research.json`（优先读与本次关键词对应的文件）
+- 与 `stock_analysis.py --with-research` 同跑时：`output/research/<provider>/<market>/<本地日期>/` 下 `*_research.json`（优先读与本次关键词对应的文件）及同名 `*_research.md`。
+- **仅** `cli/yb_search.py` 时：`output/research/<本地日期>/` 下对应 `*_research.json` / `*_research.md`。
 
 补充要求：
 
 - 先有时间意识：先看当前时间，再说明“距离上次简报约多久”。
 - 若当日有多次运行，默认以最新一次产物为本轮解读基准。
+
+### 2.1) 叙事证据与技术证据分栏（强制）
+
+当本轮**同时**存在研报检索产物与 K 线技术产物（含 `ai_overview.json`）时，在**逐标的**解读和/或**跨标的总结**中必须拆成两栏（或两个同级小标题），且**各段只引用对应来源**，禁止混写：
+
+- **叙事证据（研报检索）**：只引用 `*_research.json` / `*_research.md` 及 `full_report` 中明确标注的研报摘要字段；写观点摘要、分歧、催化/风险、需二次验证的标的清单。**不得**在此处写具体 entry/stop/tp 或手数。
+- **技术证据（K 线与 ai_overview）**：只引用 OHLCV 衍生结果与 `ai_overview.json` 的 `stats` / 123 等字段；写综合倾向、Fib 区间、触发与失效、台账状态。**不得**把研报标题或结论写成「价格已触发」或「机构已确认」式技术依据。
+
+**叙事与 K 线冲突时**（例如研报偏多叙述与图上结构未触发、或相反）：
+
+- **不**强行统一为单一方向句；允许并列表述，例如「叙事偏多 / 技术未触发」「叙事偏空 / 技术已企稳」等。
+- **默认降低执行强度**：偏观察、等下一明确触发或失效信号；纪律上对齐 **§5**（弱信号与降频）。
+
+### 2.2) 各角色输出模板（防串味）
+
+- **market-intel（仅或主叙事）**：观点摘要 → 分歧点 → 催化/风险 → 需跟踪或二次验证的标的清单。  
+- **crypto-kline / macro-kline（技术）**：综合倾向 → 关键位（含 Fib）→ 触发条件 → **失效条件** → 风险提示（含台账时说明 `triggered ≠ 成交`）。
 
 ## 3) 输出结构（固定）
 
@@ -92,7 +114,7 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 4. 风险点（至少 1 条）
 5. 免责声明（技术分析演示，不构成投资建议）
 
-若本轮包含研报搜索结果，还必须额外给一小段（可并入“风险点/触发条件”附近，但不要省略）：
+若本轮包含研报搜索结果，还必须给出 **研报线索**（可与技术分栏同轮呈现；若同时有 K 线产物，**须遵守 §2.1** 分栏，不得把叙事并入「触发条件」段落冒充技术依据）：
 
 - **研报线索**：用 2-4 条要点概括“机构在说什么/资金与配置叙事”，并明确这是研报文本线索，不是交易所官方资金流统计。
 
@@ -100,6 +122,7 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 
 在 **§0.1 已完成**（或用户明确采用默认演示画像）且已读取 `ai_overview.json` 后，**逐标的**须增加一小节（建议接在第 3 点「触发条件」之后），标题：**「情景化仓位（基于您自述参数）」**，内容至少包括：
 
+- **数据来源（强制）**：`entry`、`stop`、`tp1`/`tp2`、`triggered` **仅**能来自 **`ai_overview.json` 中技术结构字段**（如 `wyckoff_123_v1`）与用户画像演算；**不得**将研报中的目标价、评级表述或主观「机构共识价」代入本节作为 entry/stop。若仅有研报产物而无有效技术 JSON，**不写** §3.1 具体手数，至多给资金上限比例观察口径。
 - **沿用假设**：一句话复述本轮使用的权益口径、单笔风险上限%、是否假设现货。  
 - **与结构挂钩**：仅针对 **JSON 中已有 123 计划字段** 的标的，使用其中的 `entry`、`stop`、`tp1`/`tp2` 与 `triggered`；若 `neutral` 或无一致结构，写「不建议强行开仓，仅观察/降仓」，可只给 **若参与则资金上限比例**，不给具体手数。  
 - **多头现货示例公式（说明用）**：  
@@ -126,6 +149,7 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 - 若方向不清（例如 `neutral` 且无一致结构），明确写“无明显方向”。
 - 弱信号场景只给观察位与等待条件，不强制给开仓方案。
 - 必须补一句纪律提醒：降低频率与仓位，避免情绪化追单。
+- 当 **§2.1** 中叙事与技术冲突或「叙事强 / 技术弱」时，默认与弱信号同档处理：**降频、降仓、偏观察**，等待结构上明确触发或失效后再提高执行讨论强度。
 
 ## 6) 建议下次复核时间（强制）
 
@@ -144,6 +168,8 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 - `output/trade_journal_stats_latest.json`
 
 回顾内容至少包含：近7天/近30天候选单数量、命中率、止盈率、止损率。
+
+**台账与执行层边界（强制）**：`trade_journal.jsonl` 仅记录程序根据 123 /（加密）MA 波段规则生成的 **候选价位与状态**；写入前受 **`config/analysis_defaults.yaml`** 中 **`min_journal_rr`** 与可选 **`journal_quality`** 过滤，**RR 达标不代表可实盘下单**。解读时不得把台账字段等同于「已成交」或唯一执行单；情景化仓位与开单仍须按本文其它章节与用户风险画像单独演算。
 
 ## 8) 合规口径（文末固定）
 
