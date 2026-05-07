@@ -255,10 +255,14 @@ def build_trade_journal_entry(
     return out
 
 
-def run(args: Namespace) -> int:
+def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
+    def _log(message: str) -> None:
+        if emit_logs:
+            print(message, file=sys.stderr)
+
     if not args.market_brief and not args.symbol:
-        print("请指定 --market-brief 或 --symbol", file=sys.stderr)
-        return 2
+        _log("请指定 --market-brief 或 --symbol")
+        return {"exit_code": 2, "error": "missing_target"}
 
     defaults, assets_map = load_market_config(Path(args.config).resolve())
     selected: list[str] = []
@@ -273,8 +277,8 @@ def run(args: Namespace) -> int:
             assets_map[s] = {"symbol": s, "name": s, "market": market, "data_symbol": s}
             selected = [s]
     if not selected:
-        print("未找到可分析标的，请检查配置文件。", file=sys.stderr)
-        return 2
+        _log("未找到可分析标的，请检查配置文件。")
+        return {"exit_code": 2, "error": "empty_selection"}
 
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone()
@@ -311,10 +315,10 @@ def run(args: Namespace) -> int:
                 limit=args.limit,
             )
         except Exception as e:
-            print(f"[跳过] {symbol} 拉取失败: {e}", file=sys.stderr)
+            _log(f"[跳过] {symbol} 拉取失败: {e}")
             continue
         if len(rows) < 30:
-            print(f"[跳过] {symbol} 数据不足（<30根）", file=sys.stderr)
+            _log(f"[跳过] {symbol} 数据不足（<30根）")
             continue
         latest_rows_by_symbol[symbol] = rows
 
@@ -345,7 +349,7 @@ def run(args: Namespace) -> int:
             market=market,
         )
         if not stats:
-            print(f"[跳过] {symbol} 指标计算失败", file=sys.stderr)
+            _log(f"[跳过] {symbol} 指标计算失败")
             continue
 
         research: dict[str, Any] | None = None
@@ -359,7 +363,7 @@ def run(args: Namespace) -> int:
                     search_type=args.research_type,
                 )
             except Exception as e:
-                print(f"[研报] {symbol} 搜索失败（已跳过）：{e}", file=sys.stderr)
+                _log(f"[研报] {symbol} 搜索失败（已跳过）：{e}")
                 research = None
 
         cards.append(km.format_report_card(asset, stats, research=research))
@@ -428,9 +432,9 @@ def run(args: Namespace) -> int:
         report_writer.upsert_prepend_text(brief_path, brief_text)
         report_writer.write_overview_latest(overview_path, overview_payload)
         report_writer.prune_legacy_timestamped_reports(session_dir)
-        print(f"[报告] {report_path}", file=sys.stderr)
-        print(f"[简报] {brief_path}", file=sys.stderr)
-        print(f"[总览] {overview_path}", file=sys.stderr)
+        _log(f"[报告] {report_path}")
+        _log(f"[简报] {brief_path}")
+        _log(f"[总览] {overview_path}")
 
         journal_updated, journal_created, journal_path, stats_md = journal_service.process_journal(
             out_base=out_base,
@@ -439,13 +443,31 @@ def run(args: Namespace) -> int:
             now_utc=now_utc,
         )
         if journal_created or journal_updated:
-            print(f"[台账] 更新 {journal_updated} 条，新增 {journal_created} 条 -> {journal_path}", file=sys.stderr)
+            _log(f"[台账] 更新 {journal_updated} 条，新增 {journal_created} 条 -> {journal_path}")
             if stats_md is not None:
-                print(f"[台账统计] {stats_md}", file=sys.stderr)
-                print(f"[台账可读版] {journal_path.parent / 'trade_journal_readable.csv'}", file=sys.stderr)
+                _log(f"[台账统计] {stats_md}")
+                _log(f"[台账可读版] {journal_path.parent / 'trade_journal_readable.csv'}")
     else:
-        print("无可写入报告的标的（可能均数据不足）。", file=sys.stderr)
+        _log("无可写入报告的标的（可能均数据不足）。")
 
-    print(f"[会话目录] {session_dir}", file=sys.stderr)
-    return 0
+    _log(f"[会话目录] {session_dir}")
+    return {
+        "exit_code": 0,
+        "provider": provider_bucket,
+        "market": market_bucket,
+        "session_dir": str(session_dir),
+        "research_dir": str(research_dir),
+        "symbols_requested": selected,
+        "symbols_processed": [it.get("symbol") for it in overview],
+        "overview_items": overview,
+        "report_written": bool(cards),
+        "report_path": str(session_dir / "full_report.md") if cards else None,
+        "brief_path": str(session_dir / "ai_brief.md") if cards else None,
+        "overview_path": str(session_dir / "ai_overview.json") if cards else None,
+    }
+
+
+def run(args: Namespace) -> int:
+    result = execute(args, emit_logs=True)
+    return int(result.get("exit_code", 1))
 

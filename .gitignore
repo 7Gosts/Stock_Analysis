@@ -4,4 +4,6 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.*
 output/
+config/analysis_defaults.yaml

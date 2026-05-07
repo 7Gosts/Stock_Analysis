@@ -43,7 +43,7 @@
 | `analysis/` | 业务分析内核：`price_feeds` 仅做 provider 分发与 OHLCV 归一化，指标/台账在本层（见 `docs/NAMESPACE.md`） |
 | `intel/` | 研报情报：`yanbaoke_client.py`（调 Node 搜索、解析、落盘） |
 | `market_data/` | **预留**：板块/概念成分、资金流等结构化数据（当前无实现） |
-| `config/` | `market_config.json`（标的池）+ `analysis_defaults.yaml`（分析/台账阈值）+ `runtime_config.py`（统一配置读取入口） |
+| `config/` | `market_config.json`（标的池）+ `analysis_defaults.example.yaml`（配置模板）+ `analysis_defaults.yaml`（本地私有配置，不入库）+ `runtime_config.py`（统一配置读取入口） |
 | `tools/tickflow|gateio|goldapi/` | 行情 provider 客户端：外部 API 请求、超时与基础异常封装 |
 | `tools/yanbaoke/` | 研报客 Node 脚本与 `SKILL.md` |
 | `output/` | 运行产物（不入版本控制意义下的「工作区」，建议保持 gitignore） |
@@ -145,6 +145,20 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 
 ---
 
+## 本地敏感配置
+
+- 提交到仓库的模板：`config/analysis_defaults.example.yaml`
+- 本地真实配置：`config/analysis_defaults.yaml`（已在 `.gitignore` 忽略，不同步 git）
+- 首次使用建议：
+
+```bash
+cp config/analysis_defaults.example.yaml config/analysis_defaults.yaml
+```
+
+`runtime_config.py` 读取顺序：`STOCK_ANALYSIS_CRYPTO_CONFIG`（若设置）-> `config/analysis_defaults.yaml` -> `config/analysis_defaults.example.yaml`。
+
+---
+
 ## 数据源与环境变量
 
 | provider | 说明 | 环境变量（摘要） |
@@ -168,6 +182,62 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 | 行情 | `gateio` | 否（需显式指定） | 否 | `python cli/stock_analysis.py --provider gateio --symbol BTC_USDT --interval 1d --report-only --out-dir output` |
 | 行情 | `goldapi` | 否（需显式指定） | 是（内置默认 key，可被环境变量覆盖） | `python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --report-only --out-dir output` |
 | 研报情报 | `yanbaoke` | 否（需 `--with-research`） | 搜索否 / 下载是 | `python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5` |
+
+---
+
+## Agent LLM（DeepSeek）
+
+项目已支持在 `app/agent_service.py` 启用 DeepSeek 作为 **LLM 决策层**（规则引擎之上叠加 `llm_decision` 字段）：
+
+- 必填环境变量：`DEEPSEEK_API_KEY`
+- 可选环境变量：
+  - `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）
+  - `DEEPSEEK_MODEL`（默认 `deepseek-v4-flash`）
+  - `AGENT_ENABLE_LLM`（默认 `1`，设 `0` 可关闭）
+
+API 请求体可用 `use_llm_decision` 控制开关（默认 `true`）：
+
+```json
+{
+  "symbol": "BTC_USDT",
+  "provider": "gateio",
+  "interval": "1d",
+  "question": "当前是否适合等待回踩再做多？",
+  "use_rag": true,
+  "use_llm_decision": true
+}
+```
+
+说明：LLM 输出会经过 `app/guardrails.py` 校验，禁止“已成交/主力资金净流入”等编造口径。
+
+---
+
+## 飞书机器人（WebSocket）
+
+已支持飞书机器人长连接模式：用户给机器人发消息后，机器人会调用本项目 API 分析并回消息。
+
+配置项放在本地 `config/analysis_defaults.yaml`：
+
+- `feishu.app_id`
+- `feishu.app_secret`
+- `feishu.default_symbol`（可选）
+- `feishu.default_interval`（可选）
+
+启动顺序：
+
+```bash
+# 1) 先启动分析 API
+uvicorn app.api_server:app --host 0.0.0.0 --port 8000
+
+# 2) 再启动飞书机器人
+python cli/feishu_bot.py --api-base-url "http://127.0.0.1:8000"
+```
+
+消息示例：
+
+- `帮我看 BTC_USDT 4h`
+- `ETH_USDT 1d`
+- 若消息未带标的/周期，使用 `feishu.default_symbol` 与 `feishu.default_interval`。
 
 ---
 

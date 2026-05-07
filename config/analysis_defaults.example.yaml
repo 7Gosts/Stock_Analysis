@@ -1,0 +1,81 @@
+# 跨资产默认参数（模板）
+# 复制为 config/analysis_defaults.yaml 后在本地按需修改。
+
+# 写入 trade_journal.jsonl 前的最小盈亏比（与 CryptoTradeDesk 口径一致：|TP1-entry|/|entry-stop|）
+min_journal_rr: 1.2
+
+# 可选质量门：enabled 为 false 时仅 RR 门槛生效（默认保守关闭）
+journal_quality:
+  enabled: false
+  skip_structure_flags: []
+  require_mtf_align_for_crypto_only: false
+  swing_journal_enabled: true
+  swing_min_bars: 55
+  swing_require_wyckoff_aligned: false
+
+journal_action_thresholds:
+  worth_doing_rr: 1.45
+  observe_rr: 1.2
+
+# 均线系统（按资产板块）
+ma_system:
+  crypto:
+    short: 8
+    mid: 21
+    long: 55
+  equity:
+    short: 13
+    mid: 34
+    long: 89
+  gold:
+    short: 13
+    mid: 34
+    long: 89
+  default:
+    short: 20
+    mid: 60
+    long: 120
+
+# 分形/结构参数（预留）
+pivot_left: 2
+pivot_right: 2
+pivot_long_lookback_bars: 400
+pivot_merge_rel: 0.001
+pivot_touch_rel: 0.001
+pivot_mtf_match_rel: 0.004
+
+# 1-2-3 规则集标识
+method_123_ruleset_id: ross_123_reversal_fractal_v1
+
+# DeepSeek（模板）
+# api_key: 替换为你自己的 API Key
+deepseek:
+  api_key: "替换为你自己的api key"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-v4-flash"
+
+# 飞书机器人（模板）
+feishu:
+  app_id: "替换为你自己的app id"
+  app_secret: "替换为你自己的app secret"
+  default_symbol: "BTC_USDT"
+  default_interval: "4h"
+  memory:
+    enabled: true
+    backend: "jsonl" # A 阶段先用 jsonl，后续可升级 sqlite/vector
+    memory_file: "output/feishu_memory.jsonl"
+    max_messages_per_user: 2000
+    history_days: 30
+    long_term_top_k: 3
+  llm_memory_rounds: 4 # 传给路由模型的最近对话轮数（1轮=用户+机器人）
+  # 路由行为仅由此 system 描述（勿再在代码里加 rules 列表）；以下为示例，可按业务改写。
+  llm_router_system_prompt: |
+    你是飞书加密货币行情分析机器人的路由器。
+    你必须只输出一个 JSON 对象（不要 Markdown、不要代码围栏）。
+    字段：action、symbol、symbols、interval、question、clarify_message、chat_reply。
+    用户消息 JSON 中会附带 allowed_gateio_symbols（当前机器人支持的 Gate 加密标的）；analyze 时 symbol / symbols 只能从中选取。
+    action 为 analyze|clarify|chat；analyze 时单标的填 symbol，多标的填 symbols（至少 2 项）；裸代码 eth/btc/sol 须映射成列表中的 *_USDT。
+    interval 仅 15m/30m/1h/4h/1d；不要编造成交或主力资金。
+  llm_router_temperature: 0.0
+  # 用户说「短线」且未写具体周期时，路由 LLM 使用的默认 interval（合法值之一）
+  short_term_interval: "4h"

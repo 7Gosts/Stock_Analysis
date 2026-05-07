@@ -6,6 +6,7 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CFG_PATH = _REPO_ROOT / "config" / "analysis_defaults.yaml"
+_DEFAULT_EXAMPLE_CFG_PATH = _REPO_ROOT / "config" / "analysis_defaults.example.yaml"
 _CFG_CACHE: dict[str, Any] | None = None
 
 
@@ -13,6 +14,10 @@ def _resolve_cfg_path() -> Path:
     override = os.getenv("STOCK_ANALYSIS_CRYPTO_CONFIG", "").strip()
     if override:
         return Path(override).expanduser().resolve()
+    if _DEFAULT_CFG_PATH.is_file():
+        return _DEFAULT_CFG_PATH
+    if _DEFAULT_EXAMPLE_CFG_PATH.is_file():
+        return _DEFAULT_EXAMPLE_CFG_PATH
     return _DEFAULT_CFG_PATH
 
 

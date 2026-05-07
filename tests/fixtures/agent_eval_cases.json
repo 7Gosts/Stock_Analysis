@@ -1,0 +1,16 @@
+[
+  {
+    "symbol": "BTC_USDT",
+    "provider": "gateio",
+    "interval": "4h",
+    "question": "请按固定模板给出趋势、关键位和风险点",
+    "use_llm_decision": false
+  },
+  {
+    "symbol": "ETH_USDT",
+    "provider": "gateio",
+    "interval": "1d",
+    "question": "请给出触发条件和失效条件，并附证据路径",
+    "use_llm_decision": false
+  }
+]

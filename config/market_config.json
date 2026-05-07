@@ -132,6 +132,46 @@
       "data_symbol": "603690.SH",
       "research_keyword": "至纯科技",
       "tags": ["半导体设备", "高纯工艺", "湿法清洗"]
+    },
+    {
+      "symbol": "002230.SZ",
+      "name": "科大讯飞",
+      "market": "CN",
+      "data_symbol": "002230.SZ",
+      "research_keyword": "科大讯飞",
+      "tags": ["人工智能", "教育", "语音技术", "大模型"]
+    },
+    {
+      "symbol": "601899.SH",
+      "name": "紫金矿业",
+      "market": "CN",
+      "data_symbol": "601899.SH",
+      "research_keyword": "紫金矿业",
+      "tags": ["黄金", "铜", "有色金属", "资源"]
+    },
+    {
+      "symbol": "600362.SH",
+      "name": "江西铜业",
+      "market": "CN",
+      "data_symbol": "600362.SH",
+      "research_keyword": "江西铜业",
+      "tags": ["铜", "有色金属", "资源"]
+    },
+    {
+      "symbol": "601168.SH",
+      "name": "西部矿业",
+      "market": "CN",
+      "data_symbol": "601168.SH",
+      "research_keyword": "西部矿业",
+      "tags": ["铜", "铅锌", "有色金属", "资源"]
+    },
+    {
+      "symbol": "600489.SH",
+      "name": "中金黄金",
+      "market": "CN",
+      "data_symbol": "600489.SH",
+      "research_keyword": "中金黄金",
+      "tags": ["黄金", "有色金属", "资源"]
     }
   ]
 }
