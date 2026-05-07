@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from analysis.beijing_time import format_beijing
 from config.runtime_config import get_journal_action_thresholds
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -276,14 +277,14 @@ def fmt_iso_local(ts: Any) -> str:
     dt = parse_iso_utc(str(ts or ""))
     if not dt:
         return "—"
-    return dt.astimezone().strftime("%m-%d %H:%M")
+    return format_beijing(dt, fmt="%m-%d %H:%M")
 
 
 def fmt_iso_local_full(ts: Any) -> str:
     dt = parse_iso_utc(str(ts or ""))
     if not dt:
         return "—"
-    return dt.astimezone().strftime("%m-%d %H:%M:%S")
+    return format_beijing(dt, fmt="%m-%d %H:%M:%S")
 
 
 def _calc_rr(e: dict[str, Any]) -> float | None:
@@ -334,7 +335,7 @@ def _action_hint_cn(e: dict[str, Any]) -> str:
 def fmt_local_second(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    return format_beijing(dt)
 
 
 def _entry_sort_ts(e: dict[str, Any]) -> datetime:
@@ -405,7 +406,7 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
     by_symbol_30d = payload["by_symbol_30d"]
     by_market_30d = payload.get("by_market_30d") or []
     lines: list[str] = []
-    lines.append(f"# 股票交易台账统计（本机 {fmt_local_second(now_utc)}）\n\n")
+    lines.append(f"# 股票交易台账统计（北京时间 {fmt_local_second(now_utc)}）\n\n")
     lines.append("| 统计窗口 | 候选单 | 命中率 | 止盈率 | 止损率 | 平均盈亏比 |\n")
     lines.append("|---|---:|---:|---:|---:|---:|\n")
     lines.append(
@@ -522,7 +523,7 @@ def render_readable_journal_csv(now_utc: datetime, entries: list[dict[str, Any]]
 
 def render_readable_journal_md(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
     lines: list[str] = []
-    lines.append(f"# 股票开单台账（本机 {fmt_local_second(now_utc)}）\n\n")
+    lines.append(f"# 股票开单台账（北京时间 {fmt_local_second(now_utc)}）\n\n")
     if not entries:
         lines.append("暂无台账记录。\n")
         return "".join(lines)

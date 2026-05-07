@@ -6,6 +6,8 @@ from typing import Any
 
 from app.orchestrator import execute
 from app.rag_index import RagIndex
+from analysis.beijing_time import default_review_time_for_interval
+from analysis.kline_metrics import ma_snapshot_from_stats
 from config.runtime_config import get_analysis_config
 from langchain_core.tools import tool
 
@@ -48,7 +50,7 @@ def _build_fixed_template(
     risk_points: list[str],
     interval: str,
 ) -> dict[str, Any]:
-    review_time = "下个日线收盘后复核" if interval.lower() in {"1d", "1day"} else "下一根4hK线收盘后复核"
+    review_time = default_review_time_for_interval(interval)
     return {
         "综合倾向": trend,
         "关键位(Fib)": fib_zone,
@@ -184,13 +186,16 @@ def _build_analysis_bundle(
             "invalidation_conditions": invalidation_conditions,
             "risk_points": risk_points,
             "decision_source": "rules",
+            "wyckoff_123_v1": wyckoff,
             "fixed_template": fixed_template,
+            "ma_snapshot": ma_snapshot_from_stats(stats),
         },
         "risk_flags": risk_flags,
         "evidence_sources": evidence_sources,
         "meta": {
             "session_dir": run_result.get("session_dir"),
             "symbols_processed": run_result.get("symbols_processed"),
+            "journal": run_result.get("journal"),
         },
     }
 

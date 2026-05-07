@@ -22,11 +22,12 @@ class MemoryEvent:
     symbol: str | None = None
     interval: str | None = None
     question: str | None = None
+    provider: str | None = None
     created_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         ts = float(self.created_ts or time.time())
-        return {
+        d: dict[str, Any] = {
             "open_id": self.open_id,
             "role": self.role,
             "text": self.text,
@@ -36,6 +37,9 @@ class MemoryEvent:
             "question": self.question,
             "created_ts": ts,
         }
+        if self.provider:
+            d["provider"] = self.provider
+        return d
 
 
 class JsonlMemoryStore:
@@ -90,7 +94,10 @@ class JsonlMemoryStore:
                 out["interval"] = interval
             if question and "question" not in out:
                 out["question"] = question
-            if len(out) >= 3:
+            prov = str(r.get("provider") or "").strip().lower()
+            if prov in {"tickflow", "gateio", "goldapi"} and "provider" not in out:
+                out["provider"] = prov
+            if len(out) >= 4:
                 break
         return out
 

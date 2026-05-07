@@ -10,17 +10,17 @@ from typing import Any
 import requests
 from loguru import logger
 
+from app.feishu_asset_catalog import (
+    FeishuAssetCatalog,
+    canonical_tradable_symbol,
+    canonical_tradable_symbol_list,
+    get_catalog_for_repo,
+    normalize_provider,
+)
 from app.memory_store import JsonlMemoryStore, MemoryEvent
 from config.runtime_config import get_analysis_config
 from tools.deepseek.client import DeepSeekError, decide_message_action
 from tools.feishu.client import FeishuError, get_tenant_access_token, send_text_message
-
-# 路由 LLM 输出裸代码时，落地层映射到 market_config 中的 Gate 对（须在白名单内）
-_BARE_TO_PAIR: dict[str, str] = {
-    "BTC": "BTC_USDT",
-    "ETH": "ETH_USDT",
-    "SOL": "SOL_USDT",
-}
 _SEEN_MESSAGE_IDS: dict[str, float] = {}
 _MESSAGE_DEDUP_TTL_SEC = 10 * 60
 _SEEN_LOCK = threading.Lock()
@@ -37,44 +37,259 @@ def parse_user_message(
     *,
     default_symbol: str,
     default_interval: str,
+    provider: str | None = None,
+    with_research: bool = False,
+    research_keyword: str | None = None,
 ) -> dict[str, Any]:
     """仅提供会话默认值与原文 question；标的与周期由路由 LLM 决定，经 _land_* 校验后落地。"""
     raw = (text or "").strip()
     q = raw if raw else "请按固定模板输出当前行情，并结合我的问题意图解释。"
+    cat = get_catalog_for_repo(_feishu_repo_root())
+    sym_u = str(default_symbol or "").strip().upper()
+    pv = provider if provider else normalize_provider(None, symbol_upper=sym_u, catalog=cat)
+    rk = str(research_keyword).strip() if isinstance(research_keyword, str) and str(research_keyword).strip() else None
     return {
         "symbol": default_symbol,
-        "provider": "gateio",
+        "provider": pv,
         "interval": default_interval,
         "question": q,
         "use_rag": True,
         "use_llm_decision": True,
+        "with_research": bool(with_research),
+        "research_keyword": rk,
     }
 
 
-def analyze_multiple_symbols(
-    *,
-    api_base_url: str,
-    symbols: list[str],
-    interval: str,
-    user_text: str,
-) -> str:
+def analyze_multiple_symbols(*, api_base_url: str, payloads: list[dict[str, Any]]) -> str:
     cards: list[str] = []
-    for symbol in symbols:
-        payload = {
-            "symbol": symbol,
-            "provider": "gateio",
-            "interval": interval,
-            "question": user_text,
-            "use_rag": True,
-            "use_llm_decision": True,
-        }
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        sym = str(payload.get("symbol") or "")
         try:
             task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
             result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
             cards.append(format_fixed_template_reply(result))
         except Exception as exc:
-            cards.append(f"{symbol} {interval} 分析失败：{exc}")
+            cards.append(f"{sym} 分析失败：{exc}")
     return "\n\n".join(cards)
+
+
+def _fmt_leg_price(leg: Any) -> str:
+    """威科夫腿价位：支持 {price: x} 或直接数值。"""
+    if leg is None:
+        return "—"
+    if isinstance(leg, dict):
+        pv = leg.get("price")
+        if pv is None:
+            return "—"
+        try:
+            v = float(pv)
+        except (TypeError, ValueError):
+            return str(pv)
+    else:
+        try:
+            v = float(leg)
+        except (TypeError, ValueError):
+            return str(leg)
+    if abs(v) >= 1000:
+        return f"{v:.2f}"
+    return f"{v:.4f}"
+
+
+def format_wyckoff_123_reply_lines(wyckoff: Any) -> list[str]:
+    """从 stats.wyckoff_123_v1 快照生成飞书可读的两行：背景 + 123 形态要点。"""
+    if not isinstance(wyckoff, dict) or not wyckoff:
+        return []
+    bg = wyckoff.get("background") if isinstance(wyckoff.get("background"), dict) else {}
+    bias = str(bg.get("bias") or "neutral")
+    bias_cn = {
+        "long_only": "偏多（优先评估多头 123）",
+        "short_only": "偏空（优先评估空头 123）",
+        "neutral": "中性（未强制多空 123）",
+    }.get(bias, bias)
+    effort = str(bg.get("effort_result") or "—")
+    state = str(bg.get("state") or "—")
+    lines: list[str] = [
+        f"- 威科夫背景：{bias_cn}；effort_result={effort}；state={state}",
+    ]
+    sel = wyckoff.get("selected_setup") if isinstance(wyckoff.get("selected_setup"), dict) else None
+    pref = str(wyckoff.get("preferred_side") or "")
+    aligned = wyckoff.get("aligned")
+    if sel:
+        side = str(sel.get("side") or "?")
+        p1, p2, p3 = _fmt_leg_price(sel.get("p1")), _fmt_leg_price(sel.get("p2")), _fmt_leg_price(sel.get("p3"))
+        lines.append(
+            f"- 威科夫123（{side}）：P1={p1}，P2={p2}，P3={p3}；"
+            f"entry={sel.get('entry')}，stop={sel.get('stop')}，tp1={sel.get('tp1')}，tp2={sel.get('tp2')}，triggered={sel.get('triggered')}"
+        )
+    else:
+        lines.append(
+            f"- 威科夫123：当前未选出与背景一致的程式单（preferred_side={pref or '无'}，aligned={aligned}）"
+        )
+    return lines
+
+
+def format_journal_notice_lines(result_payload: dict[str, Any]) -> list[str]:
+    """本轮若写入新台账候选（过门控），生成飞书追加行。"""
+    meta = result_payload.get("meta") if isinstance(result_payload.get("meta"), dict) else {}
+    raw = meta.get("journal")
+    j = raw if isinstance(raw, dict) else {}
+    entries = j.get("new_entries")
+    if not isinstance(entries, list) or not entries:
+        return []
+    lines: list[str] = [
+        "- 台账：本轮新增候选（结构快照，非交易所成交）",
+    ]
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        sym = str(e.get("symbol") or "?")
+        iv = str(e.get("interval") or "?")
+        pt = str(e.get("plan_type") or "tactical")
+        dire = str(e.get("direction") or "?")
+        st = str(e.get("status") or "?")
+        ep = e.get("entry_price")
+        ez = e.get("entry_zone")
+        sl = e.get("stop_loss")
+        tps = e.get("take_profit_levels")
+        rr = e.get("rr")
+        ok = str(e.get("order_kind_cn") or "")
+        iid = str(e.get("idea_id") or "")
+        tp_txt = "—"
+        if isinstance(tps, list) and tps:
+            t2 = tps[1] if len(tps) > 1 else "—"
+            tp_txt = f"{tps[0]}/{t2}"
+        zone_txt = ""
+        if isinstance(ez, list) and len(ez) >= 2:
+            zone_txt = f" 区[{ez[0]},{ez[1]}]"
+        lines.append(
+            f"  · {sym} {iv} {pt} {dire} | {st} | entry={ep}{zone_txt} | stop={sl} | "
+            f"tp={tp_txt} | rr={rr} | {ok} | idea_id={iid}"
+        )
+    return lines
+
+
+def _fmt_ma_px(v: Any) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if abs(x) >= 1000:
+        return f"{x:,.2f}"
+    if abs(x) >= 1:
+        return f"{x:.2f}"
+    return f"{x:.4f}"
+
+
+def _format_ma_snapshot_feishu_line(ms: dict[str, Any]) -> str:
+    """单行兼容（测试/旧调用）；飞书主路径用 `_ma_system_block_lines`。"""
+    parts: list[str] = []
+    if "sma20" in ms:
+        parts.append(f"SMA20={_fmt_ma_px(ms['sma20'])}")
+    if "sma60" in ms:
+        parts.append(f"SMA60={_fmt_ma_px(ms['sma60'])}")
+    for period_key, val_key in (
+        ("ma_short_period", "sma_short"),
+        ("ma_mid_period", "sma_mid"),
+        ("ma_long_period", "sma_long"),
+    ):
+        if period_key in ms and val_key in ms:
+            try:
+                n = int(ms[period_key])
+            except (TypeError, ValueError):
+                continue
+            parts.append(f"SMA{n}={_fmt_ma_px(ms[val_key])}")
+    pct_bits: list[str] = []
+    for label, key in (("短", "p_ma_short_pct"), ("中", "p_ma_mid_pct"), ("长", "p_ma_long_pct")):
+        if key in ms and ms[key] is not None:
+            try:
+                pct_bits.append(f"{label}{float(ms[key]):+.2f}%")
+            except (TypeError, ValueError):
+                pass
+    if pct_bits:
+        parts.append("现价距均线 " + "，".join(pct_bits))
+    return "；".join(parts) if parts else "—"
+
+
+def _ma_float(v: Any) -> float | None:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ma_reading_sentence(ms: dict[str, Any]) -> str:
+    """基于 ma_snapshot 数值的规则读数（非模型生成）。"""
+    sv = _ma_float(ms.get("sma_short"))
+    mv = _ma_float(ms.get("sma_mid"))
+    lv = _ma_float(ms.get("sma_long"))
+    ps = _ma_float(ms.get("p_ma_short_pct"))
+    pm = _ma_float(ms.get("p_ma_mid_pct"))
+    pl = _ma_float(ms.get("p_ma_long_pct"))
+    chunks: list[str] = []
+    rels: list[str] = []
+    if ps is not None:
+        rels.append("短期均线上方" if ps >= 0 else "短期均线下方")
+    if pm is not None:
+        rels.append("中期均线上方" if pm >= 0 else "中期均线下方")
+    if pl is not None:
+        rels.append("长期均线上方" if pl >= 0 else "长期均线下方")
+    if rels:
+        chunks.append("；".join(rels) + "。")
+    if sv is not None and mv is not None and lv is not None:
+        if sv > mv > lv:
+            chunks.append("三档均线呈短>中>长，偏多头扩散结构。")
+        elif sv < mv < lv:
+            chunks.append("三档均线呈短<中<长，偏空头扩散结构。")
+        else:
+            chunks.append("三档均线非单调多/空排列，常见于震荡或趋势切换。")
+    return "".join(chunks)
+
+
+def _ma_system_block_lines(ms: dict[str, Any]) -> list[str]:
+    """飞书：均线系统分区（多行，便于扫读）。"""
+    if not isinstance(ms, dict) or not ms:
+        return []
+    lines: list[str] = ["【均线系统】"]
+    bits20: list[str] = []
+    if "sma20" in ms and ms["sma20"] is not None:
+        bits20.append(f"SMA20={_fmt_ma_px(ms['sma20'])}")
+    if "sma60" in ms and ms["sma60"] is not None:
+        bits20.append(f"SMA60={_fmt_ma_px(ms['sma60'])}")
+    if bits20:
+        lines.append("  · 宽基（阶段过滤）：" + "，".join(bits20))
+    triple: list[tuple[str, str, str]] = []
+    for period_key, val_key, pct_key in (
+        ("ma_short_period", "sma_short", "p_ma_short_pct"),
+        ("ma_mid_period", "sma_mid", "p_ma_mid_pct"),
+        ("ma_long_period", "sma_long", "p_ma_long_pct"),
+    ):
+        if period_key not in ms or val_key not in ms:
+            continue
+        try:
+            n = int(ms[period_key])
+        except (TypeError, ValueError):
+            continue
+        px = _fmt_ma_px(ms[val_key])
+        pctf = _ma_float(ms.get(pct_key))
+        if pctf is not None:
+            triple.append((str(n), px, f"{pctf:+.2f}%"))
+        else:
+            triple.append((str(n), px, ""))
+    if triple:
+        lines.append("  · 操作档（短/中/长周期）：")
+        for n, px, pct in triple:
+            if pct:
+                lines.append(f"      SMA{n}={px}，现价相对该均线 {pct}")
+            else:
+                lines.append(f"      SMA{n}={px}")
+    reading = _ma_reading_sentence(ms)
+    if reading:
+        lines.append("  · 读数：" + reading)
+    return lines
 
 
 def format_fixed_template_reply(result_payload: dict[str, Any], *, user_question: str | None = None) -> str:
@@ -90,15 +305,55 @@ def format_fixed_template_reply(result_payload: dict[str, Any], *, user_question
         risk_text = str(risk_points)
     symbol = str(analysis.get("symbol") or "UNKNOWN")
     interval = str(analysis.get("interval") or "N/A")
-    return (
-        f"{symbol} {interval} 分析结果\n"
-        f"- 综合倾向：{tpl['综合倾向']}\n"
-        f"- 关键位(Fib)：{tpl['关键位(Fib)']}\n"
-        f"- 触发条件：{tpl['触发条件']}\n"
-        f"- 失效条件：{tpl['失效条件']}\n"
-        f"- 风险点：{risk_text}\n"
-        f"- 下次复核时间：{tpl['下次复核时间']}"
+    parts: list[str] = [
+        f"━━ {symbol} {interval} ━━",
+        "",
+        "【结论】",
+        f"  · 综合倾向：{tpl['综合倾向']}",
+        "",
+    ]
+    msnap = analysis.get("ma_snapshot")
+    if isinstance(msnap, dict) and msnap:
+        parts.extend(_ma_system_block_lines(msnap))
+        parts.append("")
+    parts.extend(
+        [
+            "【关键位与触发】",
+            f"  · Fib / 区间：{tpl['关键位(Fib)']}",
+            f"  · 触发条件：{tpl['触发条件']}",
+            f"  · 失效条件：{tpl['失效条件']}",
+            "",
+            "【风险与复核】",
+            f"  · 风险点：{risk_text}",
+            f"  · 下次复核：{tpl['下次复核时间']}",
+            "",
+        ]
     )
+    ds = str(analysis.get("decision_source") or "").strip()
+    if ds:
+        parts.extend(["【决策】", f"  · 来源：{ds}", ""])
+    meta = result_payload.get("meta") if isinstance(result_payload.get("meta"), dict) else {}
+    note = meta.get("llm_warning") or meta.get("langgraph_warning")
+    if isinstance(note, str) and note.strip():
+        parts.extend(["【执行旁注】", f"  · {note.strip()[:240]}", ""])
+    wy_lines = format_wyckoff_123_reply_lines(analysis.get("wyckoff_123_v1"))
+    if wy_lines:
+        parts.append("【威科夫 123】")
+        for w in wy_lines:
+            if w.startswith("- "):
+                parts.append("  · " + w[2:])
+            else:
+                parts.append("  " + w.strip())
+        parts.append("")
+    jlines = format_journal_notice_lines(result_payload)
+    if jlines:
+        parts.append("【台账】")
+        for i, jl in enumerate(jlines):
+            if i == 0 and jl.startswith("- 台账："):
+                parts.append("  · " + jl.replace("- 台账：", "", 1).strip())
+                continue
+            parts.append(jl if jl.startswith("  ") else "  " + jl.lstrip())
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def submit_analysis_task(*, api_base_url: str, payload: dict[str, Any], timeout_sec: float = 20.0) -> str:
@@ -325,23 +580,20 @@ def build_event_handler(
             payloads = route.get("payloads")
             if not isinstance(payloads, list):
                 payloads = []
-            symbols: list[str] = []
+            reply = analyze_multiple_symbols(api_base_url=api_base_url, payloads=payloads)
+            sym_join = ",".join(
+                str(p.get("symbol") or "").strip().upper() for p in payloads if isinstance(p, dict) and str(p.get("symbol") or "").strip()
+            )
             interval_multi = default_interval
+            first: dict[str, Any] = {}
             for p in payloads:
                 if not isinstance(p, dict):
                     continue
-                s = str(p.get("symbol") or "").strip().upper()
+                if not first:
+                    first = p
                 iv = str(p.get("interval") or "").strip().lower()
-                if s:
-                    symbols.append(s)
                 if iv:
                     interval_multi = iv
-            reply = analyze_multiple_symbols(
-                api_base_url=api_base_url,
-                symbols=symbols,
-                interval=interval_multi,
-                user_text=text,
-            )
             try:
                 token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
                 send_text_message(
@@ -358,9 +610,10 @@ def build_event_handler(
                 role="assistant",
                 text=reply,
                 action="analyze",
-                symbol=",".join(symbols),
+                symbol=sym_join,
                 interval=interval_multi,
                 question=str(text or ""),
+                provider=str(first.get("provider") or "") or None,
                 memory_store=memory_store,
             )
             update_conversation_state(
@@ -368,9 +621,10 @@ def build_event_handler(
                 route={
                     "action": "analyze",
                     "payload": {
-                        "symbol": symbols[0] if symbols else "",
+                        "symbol": str(first.get("symbol") or ""),
                         "interval": interval_multi,
                         "question": text,
+                        "provider": str(first.get("provider") or ""),
                     },
                 },
                 raw_text=text,
@@ -411,6 +665,7 @@ def build_event_handler(
             symbol=str(payload.get("symbol") or ""),
             interval=str(payload.get("interval") or ""),
             question=str(payload.get("question") or ""),
+            provider=str(payload.get("provider") or "") or None,
             memory_store=memory_store,
         )
 
@@ -522,62 +777,15 @@ def _feishu_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _load_allowed_gateio_symbols() -> frozenset[str]:
-    """Gate 加密标的白名单（与 market_config.json 中 market=CRYPTO 的 symbol 一致）。"""
-    path = _feishu_repo_root() / "config" / "market_config.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return frozenset()
-    assets = data.get("assets")
-    if not isinstance(assets, list):
-        return frozenset()
-    out: list[str] = []
-    for a in assets:
-        if not isinstance(a, dict):
-            continue
-        if str(a.get("market") or "").strip().upper() != "CRYPTO":
-            continue
-        sym = str(a.get("symbol") or "").strip().upper()
-        if sym:
-            out.append(sym)
-    s = frozenset(out)
-    if not s:
-        return frozenset({"BTC_USDT", "ETH_USDT", "SOL_USDT"})
-    return s
+def _feishu_asset_catalog() -> FeishuAssetCatalog:
+    return get_catalog_for_repo(_feishu_repo_root())
 
 
-def _canonical_gate_symbol(value: str, allowed: frozenset[str]) -> str | None:
-    """将路由输出归一为白名单内的交易对；无法识别则 None。"""
-    v = (value or "").strip().upper()
-    if not v:
-        return None
-    if v in allowed:
-        return v
-    mapped = _BARE_TO_PAIR.get(v)
-    if mapped and mapped in allowed:
-        return mapped
-    return None
-
-
-def _land_router_symbol_list(value: Any, allowed: frozenset[str]) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
-    for it in value:
-        c = _canonical_gate_symbol(str(it or ""), allowed)
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
-
-
-def build_router_symbol_clarify(raw: str, allowed: frozenset[str]) -> str:
-    sample = "、".join(sorted(allowed)[:12]) if allowed else "（配置中暂无 CRYPTO 标的）"
+def build_router_symbol_clarify(raw: str, catalog: FeishuAssetCatalog) -> str:
+    sample = "、".join(sorted(catalog.allowed_symbols)[:12]) if catalog.allowed_symbols else "（配置中暂无标的）"
     tip = (
-        f"路由给出的交易对不在当前机器人支持的 Gate 加密列表中（收到：{raw.strip() or '空'}）。\n"
-        f"请从下列标的中选择并重试（示例）：{sample}"
+        f"路由给出的代码不在当前机器人支持的标的列表中（收到：{raw.strip() or '空'}）。\n"
+        f"请从 market_config 已配置的标的中选择并重试（示例）：{sample}"
     )
     return tip
 
@@ -620,16 +828,18 @@ def build_ambiguous_reply(text: str) -> str:
         return (
             f"我没看懂你的问题（收到：{raw}）。\n"
             "你可以这样问：\n"
-            "1) 看 BTC_USDT 4h\n"
-            "2) ETH 1d 左侧能不能开多？\n"
-            "3) SOL_USDT 15m 现在是突破还是假突破？"
+            "1) 看 NVDA 1d 或 BTC_USDT 4h\n"
+            "2) AU9999 1d 黄金节奏\n"
+            "3) 贵州茅台 1d 带研报\n"
+            "4) ETH 1d 左侧能不能开多？"
         )
     return (
         "我没看懂你的问题。\n"
         "你可以这样问：\n"
-        "1) 看 BTC_USDT 4h\n"
-        "2) ETH 1d 左侧能不能开多？\n"
-        "3) SOL_USDT 15m 现在是突破还是假突破？"
+        "1) 看 NVDA 1d 或 BTC_USDT 4h\n"
+        "2) AU9999 1d 黄金节奏\n"
+        "3) 贵州茅台 1d 带研报\n"
+        "4) ETH 1d 左侧能不能开多？"
     )
 
 
@@ -638,10 +848,10 @@ def build_missing_fields_reply(text: str) -> str:
     if raw:
         return (
             f"我暂时不能直接执行分析（收到：{raw}）。\n"
-            "请补充完整参数：交易对 + 周期。\n"
-            "例如：看 BTC_USDT 4h，或 ETH_USDT 1d 左侧能不能开多？"
+            "请补充：标的代码（须在 market_config 中）+ 周期（15m/30m/1h/4h/1d）。\n"
+            "例如：看 AAPL 1d；AU9999 4h；BTC_USDT 1d 带研报。"
         )
-    return "请补充完整参数：交易对 + 周期（例如 BTC_USDT 4h）。"
+    return "请补充标的与周期（例如 NVDA 1d、AU9999 1d、BTC_USDT 4h）。"
 
 
 def build_router_error_reply(text: str) -> str:
@@ -649,9 +859,9 @@ def build_router_error_reply(text: str) -> str:
     if raw:
         return (
             f"我现在没能稳定解析你的请求（收到：{raw}）。\n"
-            "请明确给出交易对与周期后重试，例如：ETH_USDT 4h。"
+            "请明确给出标的与周期后重试，例如：600519.SH 1d 或 ETH_USDT 4h。"
         )
-    return "我现在没能稳定解析请求，请明确给出交易对与周期后重试。"
+    return "我现在没能稳定解析请求，请明确给出标的与周期后重试。"
 
 
 def route_user_message(
@@ -662,19 +872,23 @@ def route_user_message(
     context: dict[str, Any] | None = None,
     recent_messages: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """意图由路由 LLM（decide_message_action）决定；代码只做白名单、周期合法值与 payload 落地。"""
+    """意图由路由 LLM（decide_message_action）决定；代码只做标的表、周期合法值与 payload 落地。"""
     raw = (text or "").strip()
     ctx = context if isinstance(context, dict) else {}
-    allowed = _load_allowed_gateio_symbols()
+    catalog = _feishu_asset_catalog()
+    allowed = catalog.allowed_symbols
+
     ds = str(default_symbol or "").strip().upper()
-    default_canon = _canonical_gate_symbol(ds, allowed)
+    default_canon = canonical_tradable_symbol(ds, catalog)
     if default_canon is None and allowed:
         default_canon = sorted(allowed)[0]
     if default_canon is None:
-        default_canon = ds or "BTC_USDT"
+        default_canon = "BTC_USDT"
 
     ctx_sym = str(ctx.get("last_symbol") or "").strip()
-    base_symbol = _canonical_gate_symbol(ctx_sym, allowed) or default_canon
+    base_symbol = canonical_tradable_symbol(ctx_sym, catalog) or default_canon
+    lp = str(ctx.get("last_provider") or "").strip().lower()
+    base_provider = lp if lp in {"tickflow", "gateio", "goldapi"} else None
     base_interval = _normalize_interval(str(ctx.get("last_interval") or default_interval), default_interval)
 
     if not raw:
@@ -684,6 +898,7 @@ def route_user_message(
         raw,
         default_symbol=base_symbol,
         default_interval=base_interval,
+        provider=base_provider,
     )
 
     try:
@@ -692,7 +907,7 @@ def route_user_message(
             default_symbol=base_symbol,
             default_interval=base_interval,
             recent_messages=recent_messages,
-            allowed_gateio_symbols=sorted(allowed),
+            tradable_assets=catalog.tradable_assets_for_prompt(),
         )
     except Exception as exc:
         _log_router_llm_failure(exc)
@@ -716,36 +931,47 @@ def route_user_message(
     if action not in {"analyze"}:
         return {"action": "clarify", "clarify_message": build_ambiguous_reply(raw)}
 
-    routed_symbols = _land_router_symbol_list(routed.get("symbols"), allowed)
+    routed_symbols = canonical_tradable_symbol_list(routed.get("symbols"), catalog)
     routed_interval = str(routed.get("interval") or "").strip().lower()
     routed_question = str(routed.get("question") or "").strip()
+    with_research = _to_bool(routed.get("with_research"), default=False)
+    global_kw = str(routed.get("research_keyword") or "").strip() or None
 
     if len(routed_symbols) > 1:
         payloads: list[dict[str, Any]] = []
         for sym in routed_symbols:
+            rk = (global_kw or catalog.research_keyword_for(sym) or None) if with_research else None
             payloads.append(
                 {
                     "symbol": sym,
-                    "provider": "gateio",
+                    "provider": normalize_provider(routed.get("provider"), symbol_upper=sym, catalog=catalog),
                     "interval": _normalize_interval(routed_interval, payload["interval"]),
                     "question": routed_question or payload["question"],
                     "use_rag": True,
                     "use_llm_decision": True,
+                    "with_research": with_research,
+                    "research_keyword": rk,
                 }
             )
         return {"action": "analyze_multi", "payloads": payloads}
 
-    single = _canonical_gate_symbol(str(routed.get("symbol") or ""), allowed)
+    single = canonical_tradable_symbol(str(routed.get("symbol") or ""), catalog)
     if single is None and len(routed_symbols) == 1:
         single = routed_symbols[0]
     if single is None:
-        return {"action": "clarify", "clarify_message": build_router_symbol_clarify(raw, allowed)}
+        return {"action": "clarify", "clarify_message": build_router_symbol_clarify(raw, catalog)}
 
     payload["symbol"] = single
     payload["interval"] = _normalize_interval(routed_interval or str(payload.get("interval") or ""), payload["interval"])
     q = str(routed.get("question") or "").strip()
     if q:
         payload["question"] = q
+    payload["provider"] = normalize_provider(routed.get("provider"), symbol_upper=single, catalog=catalog)
+    payload["with_research"] = with_research
+    if with_research:
+        payload["research_keyword"] = global_kw or catalog.research_keyword_for(single) or None
+    else:
+        payload["research_keyword"] = None
     return {"action": "analyze", "payload": payload}
 
 
@@ -768,6 +994,8 @@ def get_conversation_state(sender_open_id: str, *, memory_store: JsonlMemoryStor
             out["last_interval"] = profile["interval"]
         if profile.get("question") and not out.get("last_question"):
             out["last_question"] = profile["question"]
+        if profile.get("provider") and not out.get("last_provider"):
+            out["last_provider"] = profile["provider"]
     return out
 
 
@@ -843,6 +1071,7 @@ def append_conversation_message(
     symbol: str | None = None,
     interval: str | None = None,
     question: str | None = None,
+    provider: str | None = None,
     memory_store: JsonlMemoryStore | None = None,
 ) -> None:
     key = str(sender_open_id or "").strip()
@@ -872,6 +1101,7 @@ def append_conversation_message(
                 symbol=(symbol or None),
                 interval=(interval or None),
                 question=(question or None),
+                provider=(provider or None),
                 created_ts=now,
             )
         )
@@ -893,6 +1123,19 @@ def update_conversation_state(sender_open_id: str, *, route: dict[str, Any], raw
             st["last_symbol"] = str(payload.get("symbol") or st.get("last_symbol") or "").strip().upper()
             st["last_interval"] = str(payload.get("interval") or st.get("last_interval") or "").strip().lower()
             st["last_question"] = str(payload.get("question") or st.get("last_question") or "").strip()
+            pv = str(payload.get("provider") or "").strip().lower()
+            if pv in {"tickflow", "gateio", "goldapi"}:
+                st["last_provider"] = pv
+            st["pending_clarify"] = False
+        elif action == "analyze_multi":
+            payloads = route.get("payloads") if isinstance(route.get("payloads"), list) else []
+            first = payloads[0] if payloads and isinstance(payloads[0], dict) else {}
+            st["last_symbol"] = str(first.get("symbol") or st.get("last_symbol") or "").strip().upper()
+            st["last_interval"] = str(first.get("interval") or st.get("last_interval") or "").strip().lower()
+            st["last_question"] = str(first.get("question") or st.get("last_question") or "").strip()
+            pv = str(first.get("provider") or "").strip().lower()
+            if pv in {"tickflow", "gateio", "goldapi"}:
+                st["last_provider"] = pv
             st["pending_clarify"] = False
         elif action == "clarify":
             st["pending_clarify"] = True
@@ -907,7 +1150,7 @@ def build_chat_reply(chat_reply: Any) -> str:
         return cleaned
     return (
         "可以闲聊呀 🙂\n"
-        "我也可以继续看币：例如“看 BTC_USDT 4h”或“ETH 1d 左侧能不能开多？”"
+        "我也可以看股票/黄金/加密：例如“NVDA 1d”“AU9999 1d”“BTC_USDT 4h”，或“贵州茅台 1d 带研报”。"
     )
 
 
@@ -951,7 +1194,17 @@ def _log_routed_llm_preview(routed: dict[str, Any]) -> None:
         return
     preview = {
         k: routed.get(k)
-        for k in ("action", "symbol", "symbols", "interval", "question", "clarify_message")
+        for k in (
+            "action",
+            "symbol",
+            "symbols",
+            "interval",
+            "question",
+            "provider",
+            "with_research",
+            "research_keyword",
+            "clarify_message",
+        )
         if k in routed
     }
     line = json.dumps(preview, ensure_ascii=False)

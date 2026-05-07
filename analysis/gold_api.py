@@ -1,7 +1,7 @@
 """
 Gold API：品种列表、贵金属 OHLCV。
 
-默认按日线拉 K 线（``/api/v1/kline`` + ``period=1440``），失败再回退 ``/gold/history``。
+K 线默认 ``/api/v1/kline``（``period`` 为分钟，见 ``GOLDAPI_INTERVAL_TO_PERIOD_MIN``）；日线在 kline 失败时可回退 ``/gold/history``。
 鉴权：``appkey`` / ``apikey``（见 ``tools.goldapi.client``）。基址 ``GOLD_API_BASE``，密钥 ``GOLD_API_APPKEY``。
 """
 
@@ -44,8 +44,32 @@ def _get_varieties_cached() -> list[dict[str, Any]]:
     return _VARIETIES_CACHE
 
 
-# 日线 K：period 为分钟，厂商约定 1440 = 1 日。
-GOLDAPI_PERIOD_DAILY_MINUTES = "1440"
+# K 线 ``period`` 为分钟；多周期映射见 ``GOLDAPI_INTERVAL_TO_PERIOD_MIN``（1440 = 1 日）。
+GOLDAPI_INTERVAL_TO_PERIOD_MIN: dict[str, int] = {
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
+    "1day": 1440,
+}
+
+
+def _normalize_gold_interval(interval: str) -> str:
+    iv = (interval or "1d").strip().lower()
+    if iv == "1day":
+        return "1d"
+    return iv
+
+
+def interval_to_gold_kline_period_minutes(interval: str) -> int:
+    """将标准 interval 转为 kline API 的 period（分钟）。未知周期抛 ValueError。"""
+    iv = _normalize_gold_interval(interval)
+    m = GOLDAPI_INTERVAL_TO_PERIOD_MIN.get(iv)
+    if m is None:
+        allowed = ", ".join(sorted({k for k in GOLDAPI_INTERVAL_TO_PERIOD_MIN if k != "1day"}))
+        raise ValueError(f"goldapi 不支持的 interval={interval!r}（支持: {allowed}）")
+    return int(m)
 
 
 def resolve_gold_id(ticker: str) -> str:
@@ -86,7 +110,7 @@ def resolve_kline_symbol(ticker: str) -> str:
 
 
 def gold_api_kline_url() -> str:
-    """日线 K 默认 ``{GOLD_API_BASE}/api/v1/kline``；可用 ``GOLD_API_KLINE_URL`` 覆盖为完整 URL。"""
+    """K 线接口默认 ``{GOLD_API_BASE}/api/v1/kline``；可用 ``GOLD_API_KLINE_URL`` 覆盖为完整 URL。"""
     u = (os.getenv("GOLD_API_KLINE_URL") or "").strip().rstrip("/")
     if u:
         return u
@@ -238,9 +262,12 @@ def _rows_from_history_result(result: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _finalize_gold_rows(rows: list[dict[str, Any]], *, lim: int) -> list[dict[str, Any]]:
+def _finalize_gold_rows(
+    rows: list[dict[str, Any]], *, lim: int, rollup_to_daily: bool = True
+) -> list[dict[str, Any]]:
     rows = [r for r in rows if r["open"] > 0 and r["high"] > 0 and r["low"] > 0 and r["close"] > 0]
-    rows = _rollup_to_daily_bars(rows)
+    if rollup_to_daily:
+        rows = _rollup_to_daily_bars(rows)
     rows.sort(key=lambda x: x["time"])
     if len(rows) < 30:
         raise ValueError(
@@ -251,15 +278,16 @@ def _finalize_gold_rows(rows: list[dict[str, Any]], *, lim: int) -> list[dict[st
 
 def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) -> list[dict[str, Any]]:
     """
-    贵金属日线 OHLCV：默认 ``GET {GOLD_API_BASE}/api/v1/kline`` + ``period=1440``；
-    失败则回退 ``/gold/history``（细粒度再按日聚合）。
+    贵金属 OHLCV：``GET …/api/v1/kline``，``period`` 为分钟（15/30/60/240/1440 等与 interval 对齐）。
 
-    ticker：``data_symbol``（Au9999）或 goldId（1053）；interval 仅 ``1d``。
+    - ``interval`` 支持 ``15m`` / ``30m`` / ``1h`` / ``4h`` / ``1d``（及 ``1day``）。
+    - 日线：kline 失败时可回退 ``/gold/history``（按交易日），再按日聚合、截断。
+    - 非日线：仅走 kline；失败或空数据则抛出，**不用** history（避免把日线误当 4h）。
     """
     _ = market
-    iv = (interval or "1d").lower()
-    if iv not in {"1d", "1day"}:
-        raise ValueError("goldapi 暂仅支持日线 interval=1d（历史接口按日期）")
+    iv = _normalize_gold_interval(interval)
+    period_min = interval_to_gold_kline_period_minutes(iv)
+    is_daily = iv == "1d"
 
     appkey = gold_api_appkey()
     if not appkey:
@@ -268,9 +296,14 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
     gold_id = resolve_gold_id(ticker)
     sym = resolve_kline_symbol(ticker)
     lim = max(30, min(int(limit), 5000))
-    period = (os.getenv("GOLD_API_KLINE_PERIOD") or GOLDAPI_PERIOD_DAILY_MINUTES).strip() or GOLDAPI_PERIOD_DAILY_MINUTES
+    # 日线可沿用环境变量覆盖 period（兼容旧部署）；其余周期严格按 interval 映射
+    if is_daily:
+        period = (os.getenv("GOLD_API_KLINE_PERIOD") or str(period_min)).strip() or str(period_min)
+    else:
+        period = str(period_min)
     kline_limit = min(max(lim + 50, 120), 5000)
 
+    kline_exc: BaseException | None = None
     try:
         payload = fetch_kline(
             url=gold_api_kline_url(),
@@ -280,9 +313,15 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
             auth_key=appkey,
         )
         rows = _rows_from_history_result(payload)
-        return _finalize_gold_rows(rows, lim=lim)
-    except (ProviderError, ParseError, RateLimitError, ValueError):
-        pass
+        if rows:
+            return _finalize_gold_rows(rows, lim=lim, rollup_to_daily=is_daily)
+    except (ProviderError, ParseError, RateLimitError, ValueError) as exc:
+        kline_exc = exc
+
+    if not is_daily:
+        if kline_exc is not None:
+            raise ProviderError(f"goldapi kline 失败（interval={iv}, period={period}）: {kline_exc}") from kline_exc
+        raise ProviderError(f"goldapi kline 返回空数据（interval={iv}, period={period}）")
 
     span_days = min(int(lim * 2.2) + 120, 4000)
     end_d = datetime.now(timezone.utc).date()
@@ -296,4 +335,4 @@ def fetch_ohlcv_goldapi(*, ticker: str, market: str, interval: str, limit: int) 
         limit=min(max(lim + 200, 400), 5000),
     )
     rows = _rows_from_history_result(result)
-    return _finalize_gold_rows(rows, lim=lim)
+    return _finalize_gold_rows(rows, lim=lim, rollup_to_daily=True)

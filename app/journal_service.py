@@ -15,7 +15,7 @@ def process_journal(
     journal_candidates: list[dict[str, Any]],
     latest_rows_by_symbol: dict[str, list[dict[str, Any]]],
     now_utc: datetime,
-) -> tuple[int, int, Path, Path | None]:
+) -> tuple[int, int, Path, Path | None, list[dict[str, Any]]]:
     journal_path = out_base / "trade_journal.jsonl"
     journal_entries = load_journal(journal_path)
     journal_updated = 0
@@ -25,6 +25,7 @@ def process_journal(
         if rows and update_idea_with_rows(e, rows, now_utc):
             journal_updated += 1
     journal_created = 0
+    journal_new_entries: list[dict[str, Any]] = []
     for idea in journal_candidates:
         if has_active_idea(
             journal_entries,
@@ -38,11 +39,12 @@ def process_journal(
         if not ok:
             continue
         journal_entries.append(idea)
+        journal_new_entries.append(idea)
         journal_created += 1
 
     stats_md_path: Path | None = None
     if journal_created or journal_updated:
         save_journal(journal_path, journal_entries)
         stats_md_path, _readable_path = write_latest_stats(journal_path)
-    return journal_updated, journal_created, journal_path, stats_md_path
+    return journal_updated, journal_created, journal_path, stats_md_path, journal_new_entries
 

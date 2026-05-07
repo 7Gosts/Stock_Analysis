@@ -19,6 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from intel.yanbaoke_client import write_research_bundle
+from analysis.beijing_time import beijing_calendar_day
 
 
 def main() -> int:
@@ -29,11 +30,11 @@ def main() -> int:
     p.add_argument(
         "--out-dir",
         default=str(_REPO_ROOT / "output" / "research"),
-        help="输出根目录，默认 output/research（下按本机日期分子目录）",
+        help="输出根目录，默认 output/research（下按北京时间日期分子目录）",
     )
     args = p.parse_args()
     now_utc = datetime.now(timezone.utc)
-    day = now_utc.astimezone().strftime("%Y-%m-%d")
+    day = beijing_calendar_day(now_utc)
     out = Path(args.out_dir).resolve() / day
     try:
         r = write_research_bundle(

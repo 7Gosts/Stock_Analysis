@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from config.runtime_config import get_analysis_config
+from analysis.beijing_time import default_review_time_for_interval, now_beijing_str
 
 
 class DeepSeekError(RuntimeError):
@@ -71,14 +72,21 @@ def _feishu_router_interval_instruction(*, short_iv: str) -> str:
 
 
 # 未配置 llm_router_system_prompt 时使用；路由约束仅在此与 YAML 的 system 字段中维护，不在 Python 里维护 rules 列表。
-DEFAULT_ROUTER_SYSTEM_PROMPT = """你是飞书加密货币行情分析机器人的路由器。
+DEFAULT_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（支持股票、贵金属、加密货币与可选研报检索）。
 你必须只输出一个 JSON 对象（不要 Markdown、不要代码围栏）。
 
 字段（按需填写，未用到的填 null 或空字符串）：
-action、symbol、symbols、interval、question、clarify_message、chat_reply。
+action、symbol、symbols、interval、question、provider、with_research、research_keyword、clarify_message、chat_reply。
 
 action 取值：
-- analyze：用户要行情分析；symbol / symbols 只能从用户 JSON 里 allowed_gateio_symbols 列表中选（多标的时 symbols 至少 2 项）；口语里的 eth/btc 等须映射成列表中的 *_USDT 对；interval 仅允许 15m/30m/1h/4h/1d；question 用简短中文描述要问什么。若无法选出合法标的，用 action=clarify。
+- analyze：用户要行情分析。symbol 或 symbols 必须来自用户 JSON 里的 tradable_assets 中的 symbol（多标的时 symbols 至少 2 项，每项为字符串代码）。
+  口语里 eth/btc/sol 等须映射为 tradable_assets 中存在的 *_USDT 对（若存在）。
+  interval 仅允许 15m/30m/1h/4h/1d。
+  provider 必须与所选 symbol 在 tradable_assets 中的 provider 一致（tickflow=股票类、gateio=加密、goldapi=贵金属）。
+  with_research：用户明确要看研报/机构观点/关键词检索时为 true，否则 false。
+  research_keyword：与研报搜索对齐的关键词（可选；未给时可用资产 name 或省略由后端兜底）。
+  question：用简短中文描述要问什么。
+  若无法选出合法标的或周期，用 action=clarify。
 - clarify：标的或周期仍无法从当前句与对话上下文确定；clarify_message 说明缺什么。
 - chat：寒暄或非行情分析；chat_reply 直接回复用户。
 
@@ -128,10 +136,13 @@ def generate_decision(
     evidence_sources: list[dict[str, Any]],
     temperature: float = 0.2,
 ) -> dict[str, Any]:
+    bj = now_beijing_str()
+    review_example = default_review_time_for_interval(interval)
     prompt_obj = {
         "symbol": symbol,
         "interval": interval,
         "question": question or "",
+        "current_time_beijing": bj,
         "technical_snapshot": technical_snapshot,
         "evidence_sources": evidence_sources[:8],
         "constraints": [
@@ -139,10 +150,13 @@ def generate_decision(
             "输出必须是 JSON 对象。",
             "必须输出字段: 综合倾向,关键位(Fib),触发条件,失效条件,风险点,下次复核时间。",
             "风险点必须是数组；其余字段用简洁中文。",
+            f"当前北京时间（UTC+8）为 {bj}；字段「下次复核时间」必须写具体日期与时刻（北京时间 UTC+8），"
+            f"格式与本轮 interval 对齐，示例：{review_example}。禁止仅用「下一根收盘后」等无时间点的模糊句。",
         ],
     }
     base_payload: dict[str, Any] = {
         "model": _model_name(),
+        "thinking": {"type": "disabled"},
         "temperature": float(temperature),
         "messages": [
             {
@@ -185,7 +199,7 @@ def decide_message_action(
     default_symbol: str,
     default_interval: str,
     recent_messages: list[dict[str, str]] | None = None,
-    allowed_gateio_symbols: list[str] | None = None,
+    tradable_assets: list[dict[str, Any]] | None = None,
     timeout_sec: float = 12.0,
 ) -> dict[str, Any]:
     prompt_cfg = _feishu_router_prompt_cfg()
@@ -195,13 +209,13 @@ def decide_message_action(
     temperature = float(prompt_cfg.get("llm_router_temperature") or 0.0)
 
     short_iv = _feishu_short_term_interval()
-    prompt_obj = {
+    prompt_obj: dict[str, Any] = {
         "text": text or "",
         "default_symbol": default_symbol,
         "default_interval": default_interval,
         "recent_messages": recent_messages or [],
         "short_term_interval_default": short_iv,
-        "allowed_gateio_symbols": list(allowed_gateio_symbols or []),
+        "tradable_assets": list(tradable_assets or []),
     }
     url = f"{_base_url()}/chat/completions"
     system_with_hint = (
@@ -211,6 +225,7 @@ def decide_message_action(
     )
     base_payload: dict[str, Any] = {
         "model": _model_name(),
+        "thinking": {"type": "disabled"},
         "temperature": temperature,
         "messages": [
             {

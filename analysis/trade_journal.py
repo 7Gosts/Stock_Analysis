@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .beijing_time import to_beijing
+
 
 def parse_iso_utc(ts: str | None) -> datetime | None:
     if not ts:
@@ -19,7 +21,7 @@ def parse_iso_utc(ts: str | None) -> datetime | None:
 
 
 def to_iso_local(dt: datetime) -> str:
-    return dt.astimezone().isoformat()
+    return to_beijing(dt).replace(microsecond=0).isoformat()
 
 
 def load_journal(path: Path) -> list[dict[str, Any]]:

@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from analysis.beijing_time import beijing_calendar_day, to_beijing
 from analysis import crypto_kline_analysis
 from analysis import kline_metrics as stock_kline_metrics
 from analysis import journal_policy
@@ -63,12 +64,8 @@ def load_market_config(path: Path) -> tuple[list[str], dict[str, dict[str, Any]]
     return defaults, assets_map
 
 
-def _local_day(now_local: datetime) -> str:
-    return now_local.strftime("%Y-%m-%d")
-
-
 def _to_local_iso(dt: datetime) -> str:
-    return dt.astimezone().isoformat()
+    return to_beijing(dt).replace(microsecond=0).isoformat()
 
 
 def _output_market_bucket(assets_map: dict[str, dict[str, Any]], selected: list[str]) -> str:
@@ -93,6 +90,28 @@ def _classify_order_kind_cn(signal_last: float, entry_zone: list[float]) -> str:
     lo = float(min(entry_zone))
     hi = float(max(entry_zone))
     return "实时单" if lo <= signal_last <= hi else "挂单"
+
+
+def _compact_journal_for_notify(idea: dict[str, Any]) -> dict[str, Any]:
+    """飞书/Agent meta 用摘要，避免塞入过大对象。"""
+    reason = str(idea.get("strategy_reason") or "")
+    if len(reason) > 220:
+        reason = reason[:219] + "…"
+    return {
+        "idea_id": idea.get("idea_id"),
+        "symbol": idea.get("symbol"),
+        "interval": idea.get("interval"),
+        "plan_type": idea.get("plan_type"),
+        "direction": idea.get("direction"),
+        "status": idea.get("status"),
+        "entry_price": idea.get("entry_price"),
+        "entry_zone": idea.get("entry_zone"),
+        "stop_loss": idea.get("stop_loss"),
+        "take_profit_levels": idea.get("take_profit_levels"),
+        "rr": idea.get("rr"),
+        "order_kind_cn": idea.get("order_kind_cn"),
+        "strategy_reason": reason,
+    }
 
 
 def resolve_mtf_interval_effective(args: Namespace, market: str) -> tuple[str | None, str | None]:
@@ -281,13 +300,14 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
         return {"exit_code": 2, "error": "empty_selection"}
 
     now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone()
+    now_local = to_beijing(now_utc)
     out_base = Path(args.out_dir).resolve()
     provider_bucket = str(args.provider or "tickflow").strip().lower() or "tickflow"
     market_bucket = _output_market_bucket(assets_map, selected)
-    session_dir = out_base / provider_bucket / market_bucket / _local_day(now_local)
+    day_bucket = beijing_calendar_day(now_utc)
+    session_dir = out_base / provider_bucket / market_bucket / day_bucket
     session_dir.mkdir(parents=True, exist_ok=True)
-    research_dir = out_base / "research" / provider_bucket / market_bucket / _local_day(now_local)
+    research_dir = out_base / "research" / provider_bucket / market_bucket / day_bucket
 
     cards: list[str] = []
     briefs: list[str] = []
@@ -406,6 +426,7 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
         if swing_idea:
             journal_candidates.append(swing_idea)
 
+    journal_meta: dict[str, Any] | None = None
     if cards:
         report_path = session_dir / "full_report.md"
         brief_path = session_dir / "ai_brief.md"
@@ -436,7 +457,7 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
         _log(f"[简报] {brief_path}")
         _log(f"[总览] {overview_path}")
 
-        journal_updated, journal_created, journal_path, stats_md = journal_service.process_journal(
+        journal_updated, journal_created, journal_path, stats_md, journal_new_entries = journal_service.process_journal(
             out_base=out_base,
             journal_candidates=journal_candidates,
             latest_rows_by_symbol=latest_rows_by_symbol,
@@ -447,11 +468,17 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
             if stats_md is not None:
                 _log(f"[台账统计] {stats_md}")
                 _log(f"[台账可读版] {journal_path.parent / 'trade_journal_readable.csv'}")
+        journal_meta = {
+            "created": journal_created,
+            "updated": journal_updated,
+            "path": str(journal_path),
+            "new_entries": [_compact_journal_for_notify(x) for x in journal_new_entries],
+        }
     else:
         _log("无可写入报告的标的（可能均数据不足）。")
 
     _log(f"[会话目录] {session_dir}")
-    return {
+    out: dict[str, Any] = {
         "exit_code": 0,
         "provider": provider_bucket,
         "market": market_bucket,
@@ -465,6 +492,9 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
         "brief_path": str(session_dir / "ai_brief.md") if cards else None,
         "overview_path": str(session_dir / "ai_overview.json") if cards else None,
     }
+    if journal_meta is not None:
+        out["journal"] = journal_meta
+    return out
 
 
 def run(args: Namespace) -> int:

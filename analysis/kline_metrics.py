@@ -586,6 +586,29 @@ def compute_ohlc_stats(
     return out
 
 
+def ma_snapshot_from_stats(stats: dict[str, Any] | None) -> dict[str, Any] | None:
+    """供 API / LLM / 飞书：从 compute_ohlc_stats 结果抽取均线相关数值（无则返回 None）。"""
+    if not isinstance(stats, dict) or not stats:
+        return None
+    ma = stats.get("ma_system") if isinstance(stats.get("ma_system"), dict) else {}
+    out: dict[str, Any] = {
+        "sma20": stats.get("sma20"),
+        "sma60": stats.get("sma60"),
+        "ma_short_period": ma.get("ma_short"),
+        "ma_mid_period": ma.get("ma_mid"),
+        "ma_long_period": ma.get("ma_long"),
+        "sma_short": ma.get("sma_short"),
+        "sma_mid": ma.get("sma_mid"),
+        "sma_long": ma.get("sma_long"),
+        "p_ma_short_pct": stats.get("p_ma_short_pct"),
+        "p_ma_mid_pct": stats.get("p_ma_mid_pct"),
+        "p_ma_long_pct": stats.get("p_ma_long_pct"),
+    }
+    if not any(v is not None for v in out.values()):
+        return None
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def format_report_card(asset: dict[str, Any], stats: dict[str, Any], research: dict[str, Any] | None = None) -> str:
     symbol = asset["symbol"]
     name = asset.get("name") or symbol

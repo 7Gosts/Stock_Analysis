@@ -9,6 +9,8 @@ from app.guardrails import ensure_agent_response
 from app.langgraph_flow import run_graph
 from app.orchestrator import execute
 from app.rag_index import RagIndex
+from analysis.beijing_time import default_review_time_for_interval, review_time_has_explicit_clock
+from analysis.kline_metrics import ma_snapshot_from_stats
 from config.runtime_config import get_analysis_config
 from tools.deepseek.client import DeepSeekError, generate_decision
 
@@ -239,6 +241,8 @@ class TaskRunner:
                 "跨周期不共振时优先降仓或等待",
             ],
             "decision_source": "rules",
+            "wyckoff_123_v1": wyckoff,
+            "ma_snapshot": ma_snapshot_from_stats(stats),
         }
         fixed_template = _build_fixed_template(
             trend=str(stats.get("trend") or "未知"),
@@ -283,6 +287,7 @@ class TaskRunner:
                             "triggered": triggered,
                         },
                         "structure_flags": structure.get("flags"),
+                        "ma_snapshot": ma_snapshot_from_stats(stats),
                     },
                     evidence_sources=evidence_sources,
                 )
@@ -300,6 +305,7 @@ class TaskRunner:
             "meta": {
                 "session_dir": run_result.get("session_dir"),
                 "symbols_processed": run_result.get("symbols_processed"),
+                "journal": run_result.get("journal"),
             },
         }
         if llm_warning:
@@ -361,7 +367,7 @@ def _build_fixed_template(
     invalidation_text = (
         f"stop={invalidation_data.get('stop')}；time_stop_rule={invalidation_data.get('time_stop_rule')}"
     )
-    review_time = "下个日线收盘后复核" if interval.lower() in {"1d", "1day"} else "下一根4hK线收盘后复核"
+    review_time = default_review_time_for_interval(interval)
     return {
         "综合倾向": trend,
         "关键位(Fib)": fib_zone,
@@ -397,4 +403,8 @@ def _normalize_fixed_template(*, llm_decision: dict[str, Any], fallback: dict[st
     # 兜底：确保风险点是数组
     if not isinstance(out.get("风险点"), list):
         out["风险点"] = [str(out.get("风险点") or "常规波动风险")]
+    fb_rt = str(fallback.get("下次复核时间") or "")
+    out_rt = str(out.get("下次复核时间") or "")
+    if review_time_has_explicit_clock(fb_rt) and not review_time_has_explicit_clock(out_rt):
+        out["下次复核时间"] = fallback["下次复核时间"]
     return out

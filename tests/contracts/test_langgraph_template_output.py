@@ -122,7 +122,7 @@ class TestLangGraphTemplateOutput(unittest.TestCase):
             "触发条件": "entry=2400，tp1=2450，triggered=false",
             "失效条件": "stop=2350",
             "风险点": ["流动性"],
-            "下次复核时间": "下一根4hK线收盘后复核",
+            "下次复核时间": "2030-01-15 20:00（北京时间，下一根4h收盘）",
         }
         llm = {
             "综合倾向": "观望",
@@ -137,7 +137,7 @@ class TestLangGraphTemplateOutput(unittest.TestCase):
         self.assertEqual(out["触发条件"], fb["触发条件"])
         self.assertEqual(out["失效条件"], fb["失效条件"])
         self.assertEqual(out["综合倾向"], "观望")
-        self.assertEqual(out["下次复核时间"], "明日")
+        self.assertEqual(out["下次复核时间"], fb["下次复核时间"])
 
 
 if __name__ == "__main__":

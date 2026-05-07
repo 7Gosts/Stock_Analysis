@@ -8,6 +8,7 @@ from typing import Annotated, Any, TypedDict
 from app.agent_tools import make_tools
 from app.guardrails import ensure_agent_response
 from config.runtime_config import get_analysis_config
+from analysis.beijing_time import default_review_time_for_interval, now_beijing_str, review_time_has_explicit_clock
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
@@ -45,10 +46,15 @@ def run_graph(
 ) -> dict[str, Any]:
     app = _build_graph(repo_root=repo_root)
     q = question or "请按固定模板输出当前技术分析。"
+    bj_now = now_beijing_str()
+    review_hint = default_review_time_for_interval(interval)
     system_prompt = (
         "你是交易分析Agent。你必须先调用工具 fetch_analysis_bundle 获取事实数据，再输出 JSON。"
         "JSON 必须包含字段：综合倾向,关键位(Fib),触发条件,失效条件,风险点,下次复核时间。"
         "「关键位(Fib)」「触发条件」「失效条件」必须与工具返回的 fixed_template 中数值一致，禁止改写为「未提供」或编造未在快照中出现的价位。"
+        f"当前北京时间（UTC+8）：{bj_now}；本会话 interval={interval}。"
+        f"字段「下次复核时间」必须写含日期与钟点的北京时间（UTC+8），示例：{review_hint}；"
+        "禁止按北美/太平洋或无名时区臆测；禁止仅用「下一根收盘后」等无时间点表述。"
     )
     user_prompt = (
         f"symbol={symbol}, provider={provider}, interval={interval}, limit={limit}, "
@@ -181,6 +187,10 @@ def _normalize_fixed_template(*, llm_template: dict[str, Any], fallback: dict[st
     for key in ("关键位(Fib)", "触发条件", "失效条件"):
         if _overview_template_field_usable(fb.get(key)):
             out[key] = fb[key]
+    fb_rt = str(fb.get("下次复核时间") or "")
+    out_rt = str(out.get("下次复核时间") or "")
+    if review_time_has_explicit_clock(fb_rt) and not review_time_has_explicit_clock(out_rt):
+        out["下次复核时间"] = fb["下次复核时间"]
     return out
 
 
@@ -208,7 +218,13 @@ def _build_llm() -> ChatOpenAI:
     model = _deepseek_model()
     api_key = _deepseek_api_key()
     base_url = _deepseek_base_url()
-    return ChatOpenAI(model=model, temperature=0.2, api_key=api_key, base_url=base_url)
+    return ChatOpenAI(
+        model=model,
+        temperature=0.2,
+        api_key=api_key,
+        base_url=base_url,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
 
 
 def _deepseek_api_key() -> str:

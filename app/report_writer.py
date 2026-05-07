@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from analysis.beijing_time import format_beijing
+
 
 def fmt_local_second(now_local: datetime) -> str:
-    return now_local.strftime("%Y-%m-%d %H:%M:%S")
+    return format_beijing(now_local)
 
 
 def upsert_prepend_text(path: Path, content: str, *, sep: str = "\n\n---\n\n") -> None:

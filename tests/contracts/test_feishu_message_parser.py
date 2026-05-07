@@ -103,7 +103,8 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_ambiguous_reply_template(self) -> None:
         reply = build_ambiguous_reply("aaa")
         self.assertIn("我没看懂你的问题", reply)
-        self.assertIn("看 BTC_USDT 4h", reply)
+        self.assertIn("BTC_USDT", reply)
+        self.assertIn("NVDA", reply)
 
     def test_route_user_message_clarify_by_router(self) -> None:
         with patch(
@@ -141,6 +142,7 @@ class TestFeishuMessageParser(unittest.TestCase):
         payload = routed["payload"]
         self.assertEqual(payload["symbol"], "ETH_USDT")
         self.assertEqual(payload["interval"], "1d")
+        self.assertEqual(payload["provider"], "gateio")
 
     def test_route_bare_eth_lands_to_eth_usdt(self) -> None:
         with patch(
@@ -203,6 +205,59 @@ class TestFeishuMessageParser(unittest.TestCase):
         payloads = routed["payloads"]
         self.assertEqual(len(payloads), 3)
         self.assertEqual(payloads[0]["interval"], "1h")
+        for p in payloads:
+            self.assertEqual(p["provider"], "gateio")
+
+    def test_route_nvda_tickflow_with_research(self) -> None:
+        with patch(
+            "app.feishu_bot_service.decide_message_action",
+            return_value={
+                "action": "analyze",
+                "symbol": "NVDA",
+                "interval": "1d",
+                "question": "带研报",
+                "provider": "tickflow",
+                "with_research": True,
+                "research_keyword": "英伟达",
+            },
+        ):
+            routed = route_user_message(
+                "NVDA 1d 带研报",
+                default_symbol="BTC_USDT",
+                default_interval="4h",
+                context=None,
+            )
+        self.assertEqual(routed["action"], "analyze")
+        pl = routed["payload"]
+        self.assertEqual(pl["symbol"], "NVDA")
+        self.assertEqual(pl["provider"], "tickflow")
+        self.assertTrue(pl["with_research"])
+        self.assertEqual(pl["research_keyword"], "英伟达")
+
+    def test_route_multi_mixed_providers(self) -> None:
+        with patch(
+            "app.feishu_bot_service.decide_message_action",
+            return_value={
+                "action": "analyze",
+                "symbols": ["NVDA", "BTC_USDT", "AU9999"],
+                "interval": "4h",
+                "question": "对比节奏",
+                "with_research": False,
+            },
+        ):
+            routed = route_user_message(
+                "NVDA、BTC、黄金都看 4h",
+                default_symbol="BTC_USDT",
+                default_interval="4h",
+                context=None,
+            )
+        self.assertEqual(routed["action"], "analyze_multi")
+        payloads = routed["payloads"]
+        self.assertEqual(len(payloads), 3)
+        by_sym = {p["symbol"]: p["provider"] for p in payloads}
+        self.assertEqual(by_sym["NVDA"], "tickflow")
+        self.assertEqual(by_sym["BTC_USDT"], "gateio")
+        self.assertEqual(by_sym["AU9999"], "goldapi")
 
     def test_extract_message_create_time_ms(self) -> None:
         class _Msg:
@@ -257,12 +312,18 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_update_and_get_conversation_state(self) -> None:
         route = {
             "action": "analyze",
-            "payload": {"symbol": "SOL_USDT", "interval": "15m", "question": "看下SOL"},
+            "payload": {
+                "symbol": "SOL_USDT",
+                "interval": "15m",
+                "question": "看下SOL",
+                "provider": "gateio",
+            },
         }
         update_conversation_state("ou_xxx", route=route, raw_text="看下SOL 15m")
         st = get_conversation_state("ou_xxx")
         self.assertEqual(st.get("last_symbol"), "SOL_USDT")
         self.assertEqual(st.get("last_interval"), "15m")
+        self.assertEqual(st.get("last_provider"), "gateio")
 
     def test_recent_messages_window(self) -> None:
         append_conversation_message("ou_mem", role="user", text="看下BTC 4h")
@@ -289,8 +350,8 @@ class TestFeishuMessageParser(unittest.TestCase):
         called_kwargs = mocked.call_args.kwargs
         self.assertIn("recent_messages", called_kwargs)
         self.assertEqual(called_kwargs["recent_messages"], recent)
-        self.assertIn("allowed_gateio_symbols", called_kwargs)
-        self.assertGreater(len(called_kwargs.get("allowed_gateio_symbols") or []), 0)
+        self.assertIn("tradable_assets", called_kwargs)
+        self.assertGreater(len(called_kwargs.get("tradable_assets") or []), 0)
 
     def test_context_can_fallback_to_persistent_memory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
