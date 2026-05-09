@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 重启本仓库的 Agent API（uvicorn）并启动飞书机器人（前台）。
 # 用法（在任意目录）:
-#   bash /path/to/Stock_Analysis/scripts/feishu_dev.sh
+# bash scripts/feishu_dev.sh
 # 或先 chmod +x 后:
 #   ./scripts/feishu_dev.sh
 #
