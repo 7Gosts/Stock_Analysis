@@ -1,54 +1,28 @@
 # Stock_Analysis
 
-面向 **A 股 / 美股 / 港股（依数据源）**、**加密货币（Gate.io）** 与 **贵金属（Gold API）** 的 K 线分析 CLI：拉 OHLCV → 算结构指标 → 生成 Markdown / JSON；可选叠加 **研报客** 检索。风格接近 `CryptoTradeDesk`。
+多市场 K 线技术分析流水线：**拉取 OHLCV → 指标与结构（Fib、Wyckoff 背景、123 等）→ 生成 Markdown / JSON**；可选接入研报检索（研报客）。输出含简报、总览 JSON、全文报告及程序生成的台账快照。
 
-**合规**：仅技术分析与程序化演示，不构成投资建议。
-
----
-
-## 主路径（第一次跑通）
-
-在**本仓库根目录**依次执行：
-
-1. **安装 Python 依赖**  
-   `pip install -r requirements.txt`
-
-2. **（可选）研报搜索**需 Node.js 18+，见下文「台账与研报」。
-
-3. **跑一条默认简报**（读取 `config/market_config.json` 里的 `default_symbols`，数据源默认 `tickflow`）  
-   `python cli/stock_analysis.py --market-brief --report-only --out-dir output`  
-  - **多周期**：`--mtf-interval auto`（默认）：`1d` 主图下 tickflow 辅 `1w`；gateio 辅 `4h`；goldapi 辅 `1w`。`--no-mtf` 关闭。
-  - **分析引擎**：`--analysis-style auto`（默认，`CRYPTO`/`gateio` 自动走 crypto 风格）；可手动指定 `stock` 或 `crypto`。
-   - **结构过滤 / 时间止损**：写入 `ai_overview.json` 的 `stats` 与台账 `trade_journal.jsonl`（字段含 `structure_filter_flags`、`time_stop_deadline_utc`、`lifecycle_v1`、`mtf_aligned` 等）。
-
-4. **看产物**（`--out-dir` 下；会话目录为 **`output/<provider>/<market>/<本地日期>/`**，与 `cli/stock_analysis.py` 一致）  
-   - `ai_brief.md`、`ai_overview.json`、`full_report.md`（同目录）  
-   启用 `--with-research` 时另有：`output/research/<provider>/<market>/<本地日期>/`；**仅** `cli/yb_search.py` 时研报在 `output/research/<本地日期>/`
-
-5. **台账统计（独立命令）**  
-   `python analysis/ledger_stats.py --journal output/trade_journal.jsonl`
-
-**目录与文件一表**：见 `docs/NAMESPACE.md`（协作时先看该页）。
+**合规声明**：技术分析与程序化演示用途，不构成投资建议。
 
 ---
 
-## 项目地图
+## 项目概述
 
-### 目录职责
-
-| 路径 | 职责 |
+| 维度 | 说明 |
 |------|------|
-| `cli/` | 薄入口：`stock_analysis.py`（仅参数解析与调度调用） |
-| `app/` | 应用编排层：`orchestrator.py`（流程）、`report_writer.py`（报告/总览写入）、`journal_service.py`（台账更新与入账） |
-| `analysis/` | 业务分析内核：`price_feeds` 仅做 provider 分发与 OHLCV 归一化，指标/台账在本层（见 `docs/NAMESPACE.md`） |
-| `intel/` | 研报情报：`yanbaoke_client.py`（调 Node 搜索、解析、落盘） |
-| `market_data/` | **预留**：板块/概念成分、资金流等结构化数据（当前无实现） |
-| `config/` | `market_config.json`（标的池）+ `analysis_defaults.example.yaml`（配置模板）+ `analysis_defaults.yaml`（本地私有配置，不入库）+ `runtime_config.py`（统一配置读取入口） |
-| `tools/tickflow|gateio|goldapi/` | 行情 provider 客户端：外部 API 请求、超时与基础异常封装 |
-| `tools/yanbaoke/` | 研报客 Node 脚本与 `SKILL.md` |
-| `output/` | 运行产物（不入版本控制意义下的「工作区」，建议保持 gitignore） |
+| 形态 | Python 为主；CLI 驱动批处理；可选 HTTP Agent API（FastAPI）与飞书机器人入口 |
+| 行情源 | 可插拔 provider：`tickflow`（默认）、`gateio`（加密）、`goldapi`（贵金属） |
+| 文档产物 | `output/<provider>/<market>/<日期>/` 下 `ai_brief.md`、`ai_overview.json`、`full_report.md` |
+| 契约文档 | `AGENTS.md`（Agent 调度与数据源边界）、`AI_股票对话提示.md`（细则）、`docs/NAMESPACE.md`（模块速查） |
 
-### 数据流（一次 `stock_analysis` 跑批）
+---
+
+## 架构要点
+
+- **分层**：`cli/` 只做入口与参数；`app/` 编排、报告写入、台账服务；`analysis/` 指标与业务规则（`price_feeds` 仅负责 provider 分发与 OHLCV 归一化）；`tools/<provider>/` 存放各数据源 HTTP 客户端。
+- **外部数据**：行情请求不写在 `analysis/` 内部实现里，而是通过 `tools/` 与 `price_feeds` 接入。
+- **可选 LLM**：分析链路可接入 DeepSeek（决策与校验见 `app/`、`tools/deepseek/`）；路由层另有飞书意图路由（function calling）。
+- **预留域**：`market_data/` 计划承接板块/资金流等结构化数据，当前未实现。
 
 ```mermaid
 flowchart LR
@@ -56,11 +30,9 @@ flowchart LR
   CFG[config/market_config.json]
   DP[analysis.price_feeds]
   AE[analysis.kline_metrics]
-  TF[tools.tickflow.client]
-  GI[tools.gateio.client]
-  GA[tools.goldapi.client]
-  YB[intel.yanbaoke_client]
-  NODE[tools/yanbaoke]
+  TF[tools.tickflow]
+  GI[tools.gateio]
+  GA[tools.goldapi]
   OUT[output/]
   CLI --> CFG
   CLI --> DP
@@ -68,59 +40,69 @@ flowchart LR
   DP --> GI
   DP --> GA
   DP --> AE
-  CLI --> YB
-  YB --> NODE
   AE --> OUT
   CLI --> OUT
 ```
 
 ---
 
-## 扩展时改哪里
+## 目录结构（摘要）
 
-| 你想做… | 优先改 |
-|----------|--------|
-| 新行情源 / 新证券或商品代码规则 | `tools/<provider>/client.py` + `analysis/price_feeds.py`（前者实现 API，后者做分发与归一化） |
-| 新指标、报告字段、Fib/威科夫逻辑 | `analysis/kline_metrics.py` |
-| 台账统计口径 | `analysis/ledger_stats.py` |
-| 新 CLI 子命令或参数 | `cli/stock_analysis.py`（入口）+ `app/orchestrator.py`（编排逻辑） |
-| 新研报平台 | `intel/` + `tools/yanbaoke/`，再在 CLI 里接线 |
-| 板块/概念/官方成分股 | `market_data/`（新建模块，与 `analysis` 并列） |
-| 默认标的列表 | `config/market_config.json` |
+| 路径 | 职责 |
+|------|------|
+| `cli/` | 命令行入口 |
+| `app/` | 编排、报告、台账、可选 API 与飞书服务 |
+| `analysis/` | 指标、台账策略、价格汇聚 |
+| `intel/` | 研报客客户端（检索与落盘） |
+| `config/` | `market_config.json`、YAML 配置模板与运行时读取 |
+| `tools/` | 各 provider 客户端、`yanbaoke` Node 脚本 |
+| `market_data/` | 预留 |
+| `tests/` | 单元与契约测试 |
 
----
-
-## 能力与指标（v1）
-
-- **数据源（`--provider`）**：`tickflow`（默认）/ `gateio` / `goldapi`
-- **输出**：简报、总览 JSON、全文报告；可选研报检索目录；台账 `trade_journal.jsonl` 及统计快照、可读版  
-- **指标**：SMA20/60、近 1/5 根涨跌幅、近窗 swing 高/低、Fib 区间、趋势标签（偏多/偏空/震荡等）  
-- **交易辅助**：威科夫背景过滤（`long_only` / `short_only` / `neutral`）+ 123 结构（P1/P2/P3、触发/止损/TP）
+扩展点：新数据源 → `tools/<provider>/client.py` + `analysis/price_feeds.py`；新指标/报告字段 → `analysis/`；默认标的 → `config/market_config.json`。细则见下文「扩展对照表」。
 
 ---
 
-## 安装
+## 环境与依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-研报客搜索需要 **Node.js 18+**（例如 Ubuntu：`sudo apt install -y nodejs npm`）。
+- 研报检索依赖 **Node.js 18+**（与 `intel/`、`tools/yanbaoke/` 脚本配合）。
+- 回归测试：`python -m unittest discover -s tests -p "test_*.py"`
 
-测试建议（重构回归）：
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
+敏感配置：复制 `config/analysis_defaults.example.yaml` 为 `config/analysis_defaults.yaml`（后者通常不入库）。读取顺序见 `config/runtime_config.py`。
 
 ---
 
-## 常用命令
+## 配置要点
+
+- **`config/market_config.json`**：`symbol`、`name`、`market`、`data_symbol`、`default_symbols` 等。
+- **密钥与环境变量**：各 provider 的 Key 与覆盖方式见下文表格及 `config/analysis_defaults.example.yaml` 注释。
+- **DeepSeek（可选）**：`DEEPSEEK_API_KEY`；可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`AGENT_ENABLE_LLM`。
+
+---
+
+## 数据源与环境变量（摘要）
+
+| provider | 用途 | Key 需求（摘要） |
+|----------|------|------------------|
+| `tickflow` | 默认行情 | 可选 `TICKFLOW_API_KEY` |
+| `gateio` | 加密货币 K 线 | 公共行情接口，无需 Key |
+| `goldapi` | 贵金属 | `GOLD_API_APPKEY` / `GOLD_API_KEY` 等，见客户端与示例配置 |
+| 研报客 | 检索/摘要 | 搜索通常可不配置；下载需 `YANBAOKE_API_KEY` |
+
+贵金属接口细节（URL、period、回退逻辑）见 `tools/goldapi/client.py` 与示例配置。
+
+---
+
+## 命令示例
 
 均在仓库根目录执行。
 
 ```bash
-# 默认多标的简报（tickflow）
+# 默认标的简报（tickflow）
 python cli/stock_analysis.py --market-brief --report-only --out-dir output
 
 # 单标的
@@ -129,146 +111,78 @@ python cli/stock_analysis.py --symbol AAPL --interval 1d --limit 180 --report-on
 # 简报 + 研报线索（需 Node）
 python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5
 
-# 贵金属（见下节 Gold API）
+# 贵金属示例
 python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --limit 180 --report-only --out-dir output
 ```
 
----
+台账统计（独立）：`python analysis/ledger_stats.py --journal output/trade_journal.jsonl`
 
-## 配置（`config/market_config.json`）
-
-- **`symbol`**：命令行里用的代码（如 `AAPL`、`600519.SH`、`AU9999`）  
-- **`name`**：展示名  
-- **`market`**：`CN` / `US` / `PM`（贵金属，配合 `goldapi`）等  
-- **`data_symbol`**：传给数据源的代码（A 股如 `600519.SH`，美股如 `AAPL`，贵金属如 `Au9999` 或 `goldid` 如 `1053`）  
-- **`default_symbols`**：仅填已存在于 `assets` 的 `symbol`
+启用 `--with-research` 时，研报目录与 CLI 约定一致（与单独 `cli/yb_search.py` 的落盘路径可能不同，以脚本说明为准）。
 
 ---
 
-## 本地敏感配置
+## 输出与指标（简要）
 
-- 提交到仓库的模板：`config/analysis_defaults.example.yaml`
-- 本地真实配置：`config/analysis_defaults.yaml`（已在 `.gitignore` 忽略，不同步 git）
-- 首次使用建议：
-
-```bash
-cp config/analysis_defaults.example.yaml config/analysis_defaults.yaml
-```
-
-`runtime_config.py` 读取顺序：`STOCK_ANALYSIS_CRYPTO_CONFIG`（若设置）-> `config/analysis_defaults.yaml` -> `config/analysis_defaults.example.yaml`。
+- **指标示例**：SMA、窗口涨跌、 swing 高/低、Fib、趋势标签、Wyckoff 背景、123 结构字段等（具体字段以生成 JSON/Markdown 为准）。
+- **台账**：`output/trade_journal.jsonl` 为程序生成的结构快照，非交易所成交；写入规则见 `analysis/journal_policy.py` 与配置中的 `min_journal_rr` 等。
 
 ---
 
-## 数据源与环境变量
+## Agent API 与 LLM
 
-| provider | 说明 | 环境变量（摘要） |
-|----------|------|------------------|
-| `tickflow` | 默认；无 Key 可走免费日线 | 可选 `TICKFLOW_API_KEY` 用完整服务 |
-| `gateio` | 加密货币现货 K 线（如 `BTC_USDT`） | 无需 Key（公共行情接口） |
-| `goldapi` | [Gold API](https://gold-api.cn) 贵金属 | provider 客户端在 `tools/goldapi/client.py`；可用 **`GOLD_API_APPKEY`** / **`GOLD_API_KEY`** 覆盖；可选 **`GOLD_API_BASE`** |
+- HTTP 层：`app/api_server.py`；任务模式示例为 `/agent/analyze` 与任务轮询（飞书机器人通过 `api_base_url` 调用）。
+- 请求体常用字段含 `use_llm_decision`、`use_rag` 等；输出侧可有规则校验（如 `app/guardrails.py`），用于约束禁止杜撰的表述类型。
 
----
-
-## 外部 API 总览
-
-当前项目接入 **4 类外部 API 能力**（其中行情源 3 类 + 研报情报 1 类）：
-
-- **行情 API（3）**：`tickflow`、`gateio`、`goldapi`
-- **情报 API（1）**：`yanbaoke`（研报客）
-
-| 能力分类 | 名称 | 默认是否启用 | 是否需要 Key | 典型触发命令 |
-|---|---|---|---|---|
-| 行情 | `tickflow` | 是（`--provider` 默认） | 可选（无 Key 走免费域名） | `python cli/stock_analysis.py --market-brief --report-only --out-dir output` |
-| 行情 | `gateio` | 否（需显式指定） | 否 | `python cli/stock_analysis.py --provider gateio --symbol BTC_USDT --interval 1d --report-only --out-dir output` |
-| 行情 | `goldapi` | 否（需显式指定） | 是（内置默认 key，可被环境变量覆盖） | `python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --report-only --out-dir output` |
-| 研报情报 | `yanbaoke` | 否（需 `--with-research`） | 搜索否 / 下载是 | `python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5` |
-
----
-
-## Agent LLM（DeepSeek）
-
-项目已支持在 `app/agent_service.py` 启用 DeepSeek 作为 **LLM 决策层**（规则引擎之上叠加 `llm_decision` 字段）：
-
-- 必填环境变量：`DEEPSEEK_API_KEY`
-- 可选环境变量：
-  - `DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`）
-  - `DEEPSEEK_MODEL`（默认 `deepseek-v4-flash`）
-  - `AGENT_ENABLE_LLM`（默认 `1`，设 `0` 可关闭）
-
-API 请求体可用 `use_llm_decision` 控制开关（默认 `true`）：
+示例请求体（字段以服务端校验为准）：
 
 ```json
 {
   "symbol": "BTC_USDT",
   "provider": "gateio",
   "interval": "1d",
-  "question": "当前是否适合等待回踩再做多？",
+  "question": "当前结构偏多还是偏空？",
   "use_rag": true,
   "use_llm_decision": true
 }
 ```
 
-说明：LLM 输出会经过 `app/guardrails.py` 校验，禁止“已成交/主力资金净流入”等编造口径。
+---
+
+## 飞书机器人（可选）
+
+- 机器人进程通过 WebSocket 收消息；行情分析请求转发至本地 Agent API（需先启动与 `--api-base-url` 一致的 HTTP 服务）。
+- 意图路由使用 DeepSeek tools/function calling；可选叙事回复等开关见 `feishu.*` 配置段。
+- 一键开发脚本：`scripts/feishu_dev.sh`（启动 API + 机器人，详见脚本注释）。
+- 路由行为调试（直连 DeepSeek，不依赖 HTTP 服务）：`scripts/feishu_route_llm_probe.py`。
 
 ---
 
-## 飞书机器人（WebSocket）
+## 扩展对照表
 
-已支持飞书机器人长连接模式：用户给机器人发消息后，机器人会调用本项目 API 分析并回消息。
-
-配置项放在本地 `config/analysis_defaults.yaml`：
-
-- `feishu.app_id`
-- `feishu.app_secret`
-- `feishu.default_symbol`（可选）
-- `feishu.default_interval`（可选）
-
-启动顺序：
-
-```bash
-# 1) 先启动分析 API
-uvicorn app.api_server:app --host 0.0.0.0 --port 8000
-
-# 2) 再启动飞书机器人
-python cli/feishu_bot.py --api-base-url "http://127.0.0.1:8000"
-```
-
-消息示例：
-
-- `帮我看 BTC_USDT 4h`
-- `ETH_USDT 1d`
-- 若消息未带标的/周期，使用 `feishu.default_symbol` 与 `feishu.default_interval`。
+| 目标 | 优先修改位置 |
+|------|----------------|
+| 新行情源或代码规则 | `tools/<provider>/client.py`、`analysis/price_feeds.py` |
+| 指标与报告逻辑 | `analysis/` |
+| 台账口径 | `analysis/ledger_stats.py`、`analysis/journal_policy.py` |
+| CLI 参数与编排 | `cli/stock_analysis.py`、`app/orchestrator.py` |
+| 研报接入 | `intel/`、`tools/yanbaoke/` |
+| 板块/资金流等结构化数据 | `market_data/`（新建） |
 
 ---
 
-## 贵金属（Gold API）
+## 报告字段阅读提示（威科夫 + 123）
 
-- **默认日线 K 线**：``GET {GOLD_API_BASE}/api/v1/kline``，``period=1440``（分钟 = 1 日）、``symbol``、``limit``、鉴权（``api.gold-api.cn`` 用 ``apikey``，其余与 history 一样用 ``appkey``，由代码按主机名选择）。可用 **`GOLD_API_KLINE_URL`** 覆盖为完整 K 线 URL；可选 **`GOLD_API_KLINE_PERIOD`** 改日线分钟数（默认 **1440**）。失败或有效根数不足时回退 **history**。
-- **回退**：``GET .../api/v1/gold/history``（``goldid``、日期区间、``limit``、``appkey``）；若返回细粒度 K 线，仍按**日历日**聚合成日线再算指标。  
-- **品种**：`Au9999` / `goldid` 等，见 `GET /api/v1/gold/varieties`。CLI：**`goldapi` + `interval=1d`**。  
-- **配额 / 公开仓库**：套餐为准；建议生产环境仅用环境变量注入 key。
-
----
-
-## 台账与研报
-
-- **台账定位**：`output/trade_journal.jsonl` 为 **结构快照**（Wyckoff 123 演算 + 可选加密 **swing** 第二轨），**不是**交易所成交回报；与 CryptoTradeDesk 类似，写入前会过滤 **过低盈亏比** 的候选。
-- **写入条件**：由 `cli/stock_analysis.py` 生成候选后，经 [`analysis/journal_policy.py`](analysis/journal_policy.py) 校验 **`min_journal_rr`**（默认见 [`config/analysis_defaults.yaml`](config/analysis_defaults.yaml)）及可选 **`journal_quality`**（默认关闭，仅 RR 生效）。加密 / `gateio` 在通过校验时还可追加 **`plan_type=swing`** 的波段候选（与 **`tactical`** 分槽，避免互相覆盖）。
-- **统计与可读表**：每次有新增或更新时刷新 `trade_journal_stats_latest.md`、`trade_journal_readable.md`、`trade_journal_readable.csv`；也可单独运行 `python analysis/ledger_stats.py --journal output/trade_journal.jsonl`。
-- **研报客**：`intel/yanbaoke_client.py` → `tools/yanbaoke/scripts/search.mjs`；**搜索**一般无需 Key，**下载**需 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
+- 背景过滤：`long_only` / `short_only` / `neutral` 表示计划倾向语境。
+- 123：按 P1/P2/P3、`entry`、`stop`、`tp` 等字段阅读；未触发勿理解为已成交。
+- R：相对止损空间的倍数口径（若报告中给出）。
 
 ---
 
-## 报告字段怎么读（威科夫 + 123）
+## 相关文档
 
-- **背景**：`long_only` 偏多头计划，`short_only` 偏空头，`neutral` 不强行给方向。  
-- **123**：按 P1/P2/P3、`entry`、`stop`、`tp1`/`tp2` 读；未触发勿写成已入场。  
-- **R 含义**：TP 相对止损空间约 1.5R / 2.5R。
-
----
-
-## AI / 自动化约定
-
-- **给人看的操作说明**：本 README。  
-- **给 Agent 的执行契约（推荐顺序）**：根目录 **`AGENTS.md`**（新会话一页入口；含 **market-intel / crypto-kline / macro-kline** 三逻辑模式与 **§0.2 调度协议**）→ `AI_股票对话提示.md`（全文章节与公式）→ `.cursor/rules/stock-analysis-agent.mdc`（IDE 常驻规则）。  
-- **文件速查**：`docs/NAMESPACE.md`。
+| 文档 | 用途 |
+|------|------|
+| `AGENTS.md` | Agent 数据源角色与路由约定 |
+| `AI_股票对话提示.md` | 长文契约与公式引用 |
+| `docs/NAMESPACE.md` | 模块与文件索引 |
+| `.cursor/rules/stock-analysis-agent.mdc` | IDE 内规则（若使用 Cursor） |

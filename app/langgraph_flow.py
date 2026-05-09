@@ -49,17 +49,14 @@ def run_graph(
     bj_now = now_beijing_str()
     review_hint = default_review_time_for_interval(interval)
     system_prompt = (
-        "你是交易分析Agent。你必须先调用工具 fetch_analysis_bundle 获取事实数据，再输出 JSON。"
-        "JSON 必须包含字段：综合倾向,关键位(Fib),触发条件,失效条件,风险点,下次复核时间。"
-        "「关键位(Fib)」「触发条件」「失效条件」必须与工具返回的 fixed_template 中数值一致，禁止改写为「未提供」或编造未在快照中出现的价位。"
-        f"当前北京时间（UTC+8）：{bj_now}；本会话 interval={interval}。"
-        f"字段「下次复核时间」必须写含日期与钟点的北京时间（UTC+8），示例：{review_hint}；"
-        "禁止按北美/太平洋或无名时区臆测；禁止仅用「下一根收盘后」等无时间点表述。"
+        "你是交易分析Agent。你只做一件事：调用工具 fetch_analysis_bundle 拉取行情与结构化分析事实；"
+        "不要输出最终结论文本，也勿再输出业务 JSON，系统会在工具返回后自动组装 fixed_template。"
+        f"当前北京时间（UTC+8）：{bj_now}；本会话 interval={interval}；复核时间示例：{review_hint}。"
     )
     user_prompt = (
         f"symbol={symbol}, provider={provider}, interval={interval}, limit={limit}, "
         f"out_dir={out_dir or ''}, question={q}, rag_top_k={rag_top_k}, analysis_style={analysis_style}. "
-        "请先调工具，再给出最终结论。"
+        "请调用 fetch_analysis_bundle 获取数据。"
     )
     state: AgentState = {
         "messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
@@ -90,7 +87,7 @@ def _build_graph(*, repo_root: Path):
         fallback = analysis_result.get("fixed_template") if isinstance(analysis_result.get("fixed_template"), dict) else {}
         fixed_template = _normalize_fixed_template(llm_template=llm_template, fallback=fallback)
         analysis_result["fixed_template"] = fixed_template
-        analysis_result["decision_source"] = "llm+rules"
+        analysis_result["decision_source"] = "rules"
         payload = {
             "analysis_result": analysis_result,
             "risk_flags": bundle.get("risk_flags") or ["normal"],
@@ -114,7 +111,7 @@ def _build_graph(*, repo_root: Path):
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: "format"})
-    workflow.add_edge("tools", "agent")
+    workflow.add_edge("tools", "format")
     workflow.add_edge("format", "guardrail")
     workflow.add_edge("guardrail", END)
     return workflow.compile()

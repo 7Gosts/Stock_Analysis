@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,19 +34,7 @@ class _CycleLLM:
                     }
                 ],
             )
-        return AIMessage(
-            content=json.dumps(
-                {
-                    "综合倾向": "震荡偏多",
-                    "关键位(Fib)": "0.5~0.618",
-                    "触发条件": "突破0.618",
-                    "失效条件": "跌破0.5",
-                    "风险点": ["震荡反复"],
-                    "下次复核时间": "下一根4hK线",
-                },
-                ensure_ascii=False,
-            )
-        )
+        return AIMessage(content="")
 
 
 def _cycle_tools(*, repo_root: Path):
@@ -109,7 +96,7 @@ class TestLangGraphReactToolCycle(unittest.TestCase):
         trace = out.get("meta", {}).get("tool_trace") or []
         self.assertTrue(trace)
         self.assertIn("fetch_analysis_bundle", trace[0])
-        self.assertEqual(out["analysis_result"]["decision_source"], "llm+rules")
+        self.assertEqual(out["analysis_result"]["decision_source"], "rules")
 
 
 if __name__ == "__main__":

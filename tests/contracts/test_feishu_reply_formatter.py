@@ -33,7 +33,7 @@ class TestFeishuReplyFormatter(unittest.TestCase):
             "analysis_result": {
                 "symbol": "X",
                 "interval": "1d",
-                "decision_source": "llm+rules",
+                "decision_source": "rules",
                 "fixed_template": {
                     "综合倾向": "多",
                     "关键位(Fib)": "x",
@@ -47,7 +47,7 @@ class TestFeishuReplyFormatter(unittest.TestCase):
         }
         text = format_fixed_template_reply(result)
         self.assertIn("【决策】", text)
-        self.assertIn("来源：llm+rules", text)
+        self.assertIn("来源：rules", text)
         self.assertIn("【执行旁注】", text)
 
     def test_format_includes_wyckoff_123_when_present(self) -> None:

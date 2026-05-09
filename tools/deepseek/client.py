@@ -71,26 +71,172 @@ def _feishu_router_interval_instruction(*, short_iv: str) -> str:
     )
 
 
-# 未配置 llm_router_system_prompt 时使用；路由约束仅在此与 YAML 的 system 字段中维护，不在 Python 里维护 rules 列表。
-DEFAULT_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（支持股票、贵金属、加密货币与可选研报检索）。
-你必须只输出一个 JSON 对象（不要 Markdown、不要代码围栏）。
+# 未配置 feishu.llm_router_system_prompt 时使用；以 tools 为主，无 tool_calls 时见 decide_feishu_route 对 assistant 正文的兜底。
+DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报）。
+优先调用提供的工具之一完成意图；不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。
+闲聊、致谢或引导用户发起行情分析时，请使用 reply_chat：message 可写多段完整中文，可简要归类列出用户 JSON 里 tradable_assets 相关标的与示例问法（不必抄全表名，分类说明即可）。
+若模型接口未返回 tool_calls、仅在 assistant 正文中输出内容，后端也会把正文交给用户；但仍应优先用 reply_chat(message=...) 一次性给出可读回复。
+用户消息 JSON 中含 tradable_assets（来自 market_config）、default_symbol、default_interval、short_term_interval_default。
+行情分析必须调用 analyze_market：symbol 或 symbols 只能从 tradable_assets 里的 symbol 选取；多标的时 symbols 至少 2 项。
+口语里 eth/btc/sol 等须映射为表中存在的代码（如 *_USDT）。
+interval 仅 15m/30m/1h/4h/1d；用户说短线且未写具体周期时用 short_term_interval_default。
+provider 须与所选标的在 tradable_assets 中的 provider 一致。
+with_research：用户明确要看研报/机构观点时为 true。
+信息不足无法选合法标的或周期用 ask_clarify。"""
 
-字段（按需填写，未用到的填 null 或空字符串）：
-action、symbol、symbols、interval、question、provider、with_research、research_keyword、clarify_message、chat_reply。
 
-action 取值：
-- analyze：用户要行情分析。symbol 或 symbols 必须来自用户 JSON 里的 tradable_assets 中的 symbol（多标的时 symbols 至少 2 项，每项为字符串代码）。
-  口语里 eth/btc/sol 等须映射为 tradable_assets 中存在的 *_USDT 对（若存在）。
-  interval 仅允许 15m/30m/1h/4h/1d。
-  provider 必须与所选 symbol 在 tradable_assets 中的 provider 一致（tickflow=股票类、gateio=加密、goldapi=贵金属）。
-  with_research：用户明确要看研报/机构观点/关键词检索时为 true，否则 false。
-  research_keyword：与研报搜索对齐的关键词（可选；未给时可用资产 name 或省略由后端兜底）。
-  question：用简短中文描述要问什么。
-  若无法选出合法标的或周期，用 action=clarify。
-- clarify：标的或周期仍无法从当前句与对话上下文确定；clarify_message 说明缺什么。
-- chat：寒暄或非行情分析；chat_reply 直接回复用户。
+def _feishu_router_tool_definitions() -> list[dict[str, Any]]:
+    """OpenAI-compatible tool list for chat/completions."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_market",
+                "description": "用户要行情分析：拉 K 线并生成技术结论。标的必须来自 tradable_assets。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "单标的代码，如 BTC_USDT、NVDA；与 symbols 二选一",
+                        },
+                        "symbols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "多标的（至少 2 个），与 symbol 二选一",
+                        },
+                        "interval": {
+                            "type": "string",
+                            "description": "K 线周期：15m、30m、1h、4h、1d",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "tickflow | gateio | goldapi；须与标的表中一致，可省略由后端推断",
+                        },
+                        "question": {"type": "string", "description": "用户想问的简短中文"},
+                        "with_research": {"type": "boolean", "description": "是否附带研报检索"},
+                        "research_keyword": {
+                            "type": "string",
+                            "description": "研报检索关键词，可选",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reply_chat",
+                "description": "寒暄、致谢、引导用户发起行情分析；用 message 写完整可读回复（可多段，可概括 tradable_assets 中的标的分类与示例问法）。回答尽量简短时不强行压缩：首访寒暄可把支持的资产类型与示例一句话列清。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "回复正文"},
+                    },
+                    "required": ["message"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_clarify",
+                "description": "无法从当前句与上下文确定合法标的或周期时，说明缺什么。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "澄清说明"},
+                    },
+                    "required": ["message"],
+                },
+            },
+        },
+    ]
 
-不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。"""
+
+def _parse_tool_arguments(raw: str) -> dict[str, Any]:
+    if not (raw or "").strip():
+        return {}
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
+    """将第一条 tool_call 转为 route_user_message 所需的 dict（含 action 等）。"""
+    if not isinstance(tool_calls, list) or not tool_calls:
+        raise DeepSeekError("路由 tool_calls 为空")
+    tc0 = tool_calls[0]
+    if not isinstance(tc0, dict):
+        raise DeepSeekError("路由 tool_call 结构异常")
+    fn = tc0.get("function")
+    if not isinstance(fn, dict):
+        raise DeepSeekError("路由 tool_call.function 缺失")
+    name = str(fn.get("name") or "").strip()
+    raw_args = str(fn.get("arguments") or "")
+    args = _parse_tool_arguments(raw_args)
+
+    if name == "analyze_market":
+        sym = args.get("symbol")
+        syms = args.get("symbols")
+        out: dict[str, Any] = {"action": "analyze"}
+        if isinstance(sym, str) and sym.strip():
+            out["symbol"] = sym.strip()
+        if isinstance(syms, list) and len(syms) >= 2:
+            out["symbols"] = [str(x).strip() for x in syms if str(x).strip()]
+        iv = str(args.get("interval") or "").strip().lower()
+        if iv:
+            out["interval"] = iv
+        pv = str(args.get("provider") or "").strip().lower()
+        if pv:
+            out["provider"] = pv
+        q = args.get("question")
+        if isinstance(q, str) and q.strip():
+            out["question"] = q.strip()
+        if "with_research" in args:
+            out["with_research"] = bool(args.get("with_research"))
+        rk = args.get("research_keyword")
+        if isinstance(rk, str) and rk.strip():
+            out["research_keyword"] = rk.strip()
+        return out
+
+    if name == "reply_chat":
+        msg = args.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return {"action": "chat", "chat_reply": msg.strip()}
+        return {"action": "chat"}
+
+    if name == "ask_clarify":
+        msg = args.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return {"action": "clarify", "clarify_message": msg.strip()}
+        return {"action": "clarify", "clarify_message": ""}
+
+    raise DeepSeekError(f"未知路由工具: {name!r}")
+
+
+def _extract_router_assistant_text(message: dict[str, Any]) -> str:
+    """从 chat/completions 的 assistant message 取出可读正文（兼容字符串或多段 content）。"""
+    if not isinstance(message, dict):
+        return ""
+    c = message.get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        parts: list[str] = []
+        for p in c:
+            if isinstance(p, dict):
+                if p.get("type") == "text" and isinstance(p.get("text"), str):
+                    parts.append(p["text"])
+                elif isinstance(p.get("content"), str):
+                    parts.append(p["content"])
+            elif isinstance(p, str):
+                parts.append(p)
+        return "".join(parts).strip()
+    return ""
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout_sec: float = 30.0) -> dict[str, Any]:
@@ -125,6 +271,102 @@ def _post_json(url: str, payload: dict[str, Any], timeout_sec: float = 30.0) -> 
     if isinstance(obj, dict) and obj.get("error"):
         raise DeepSeekError(f"DeepSeek 返回错误: {obj.get('error')}")
     return obj if isinstance(obj, dict) else {"raw": obj}
+
+
+def _build_feishu_route_payload(
+    *,
+    text: str,
+    default_symbol: str,
+    default_interval: str,
+    recent_messages: list[dict[str, str]] | None,
+    tradable_assets: list[dict[str, Any]] | None,
+) -> tuple[str, dict[str, Any]]:
+    prompt_cfg = _feishu_router_prompt_cfg()
+    system_prompt = str(prompt_cfg.get("llm_router_system_prompt") or "").strip()
+    if not system_prompt:
+        system_prompt = DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT
+    temperature = float(prompt_cfg.get("llm_router_temperature") or 0.0)
+    short_iv = _feishu_short_term_interval()
+    prompt_obj: dict[str, Any] = {
+        "text": text or "",
+        "default_symbol": default_symbol,
+        "default_interval": default_interval,
+        "recent_messages": recent_messages or [],
+        "short_term_interval_default": short_iv,
+        "tradable_assets": list(tradable_assets or []),
+    }
+    url = f"{_base_url()}/chat/completions"
+    system_with_hint = system_prompt + _feishu_router_interval_instruction(short_iv=short_iv)
+    base_payload: dict[str, Any] = {
+        "model": _model_name(),
+        "thinking": {"type": "disabled"},
+        "temperature": temperature,
+        "messages": [
+            {"role": "system", "content": system_with_hint},
+            {"role": "user", "content": json.dumps(prompt_obj, ensure_ascii=False)},
+        ],
+        "tools": _feishu_router_tool_definitions(),
+        "tool_choice": "auto",
+    }
+    return url, base_payload
+
+
+def _feishu_completion_response_to_route(res: dict[str, Any]) -> dict[str, Any]:
+    try:
+        msg = res["choices"][0]["message"]
+    except Exception as exc:
+        raise DeepSeekError(f"DeepSeek 路由(tool)响应结构异常: {res}") from exc
+    if not isinstance(msg, dict):
+        raise DeepSeekError(f"DeepSeek 路由 message 非对象: {msg!r}")
+    tool_calls = msg.get("tool_calls")
+    if tool_calls:
+        return _tool_calls_to_routed_dict(tool_calls)
+    raw_text = _extract_router_assistant_text(msg)
+    if raw_text:
+        return {"action": "chat", "chat_reply": raw_text}
+    raise DeepSeekError("DeepSeek 路由未返回 tool_calls，且无 assistant 正文")
+
+
+def decide_feishu_route(
+    *,
+    text: str,
+    default_symbol: str,
+    default_interval: str,
+    recent_messages: list[dict[str, str]] | None = None,
+    tradable_assets: list[dict[str, Any]] | None = None,
+    timeout_sec: float = 12.0,
+) -> dict[str, Any]:
+    """飞书路由：DeepSeek chat/completions + tools；优先 tool_calls；无 tool_calls 时若有 assistant 正文则视为闲聊（action=chat）。"""
+    url, payload = _build_feishu_route_payload(
+        text=text,
+        default_symbol=default_symbol,
+        default_interval=default_interval,
+        recent_messages=recent_messages,
+        tradable_assets=tradable_assets,
+    )
+    res = _post_json(url, payload, timeout_sec=timeout_sec)
+    return _feishu_completion_response_to_route(res)
+
+
+def feishu_route_deepseek_raw_and_routed(
+    *,
+    text: str,
+    default_symbol: str,
+    default_interval: str,
+    recent_messages: list[dict[str, str]] | None = None,
+    tradable_assets: list[dict[str, Any]] | None = None,
+    timeout_sec: float = 12.0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """真实调用 DeepSeek：返回 (chat/completions 完整 JSON, 路由解析 dict)。供调试脚本打印原始响应。"""
+    url, payload = _build_feishu_route_payload(
+        text=text,
+        default_symbol=default_symbol,
+        default_interval=default_interval,
+        recent_messages=recent_messages,
+        tradable_assets=tradable_assets,
+    )
+    res = _post_json(url, payload, timeout_sec=timeout_sec)
+    return res, _feishu_completion_response_to_route(res)
 
 
 def generate_decision(
@@ -193,71 +435,51 @@ def generate_decision(
     return parsed
 
 
-def decide_message_action(
-    *,
-    text: str,
-    default_symbol: str,
-    default_interval: str,
-    recent_messages: list[dict[str, str]] | None = None,
-    tradable_assets: list[dict[str, Any]] | None = None,
-    timeout_sec: float = 12.0,
-) -> dict[str, Any]:
-    prompt_cfg = _feishu_router_prompt_cfg()
-    system_prompt = str(prompt_cfg.get("llm_router_system_prompt") or "").strip()
-    if not system_prompt:
-        system_prompt = DEFAULT_ROUTER_SYSTEM_PROMPT
-    temperature = float(prompt_cfg.get("llm_router_temperature") or 0.0)
+# 飞书：将已锁事实 JSON 写作口语化正文（不得 invent 价位；与 guardrails 禁止口径一致）
+DEFAULT_FEISHU_NARRATIVE_SYSTEM = (
+    "你是面向飞书聊天的行情分析撰稿人。用户消息为 JSON，其中 facts 为程序算好的事实快照（含 fixed_template、均线、威科夫等）。\n"
+    "要求：\n"
+    "1) 只使用 facts 中已出现的数字、区间与条件；禁止编造未在 facts 中出现的具体价格、成交量、成交状态或「已可下单」类结论。\n"
+    "2) 语气自然、分段清晰，可用少量小标题；避免整段【结论】、━━ 等刻板公文排版。\n"
+    "3) 禁止出现以下口径：已成交、成交回报、主力资金净流入、交易所逐笔资金流。\n"
+    "4) 文末用一句话声明：仅供技术分析与程序化演示，不构成投资建议。\n"
+    "输出为纯中文正文，不要使用 Markdown 代码围栏。"
+)
 
-    short_iv = _feishu_short_term_interval()
-    prompt_obj: dict[str, Any] = {
-        "text": text or "",
-        "default_symbol": default_symbol,
-        "default_interval": default_interval,
-        "recent_messages": recent_messages or [],
-        "short_term_interval_default": short_iv,
-        "tradable_assets": list(tradable_assets or []),
-    }
+
+def generate_feishu_narrative(
+    *,
+    facts: dict[str, Any],
+    user_question: str | None = None,
+    timeout_sec: float = 60.0,
+) -> str:
+    """基于工具锁事实生成飞书可读长文；不负责拉行情。"""
+    cfg = get_analysis_config()
+    fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
+    temperature = float(fei.get("narrative_temperature", 0.35))
+    custom = str(fei.get("narrative_system_prompt") or "").strip()
+    system_prompt = custom if custom else DEFAULT_FEISHU_NARRATIVE_SYSTEM
+    user_obj: dict[str, Any] = {"facts": facts}
+    if user_question and str(user_question).strip():
+        user_obj["user_question"] = str(user_question).strip()
     url = f"{_base_url()}/chat/completions"
-    system_with_hint = (
-        system_prompt
-        + _feishu_router_interval_instruction(short_iv=short_iv)
-        + _DEEPSEEK_JSON_OBJECT_SYSTEM_SUFFIX
-    )
-    base_payload: dict[str, Any] = {
+    payload: dict[str, Any] = {
         "model": _model_name(),
         "thinking": {"type": "disabled"},
         "temperature": temperature,
         "messages": [
-            {
-                "role": "system",
-                "content": system_with_hint,
-            },
-            {"role": "user", "content": json.dumps(prompt_obj, ensure_ascii=False)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_obj, ensure_ascii=False)},
         ],
     }
-    try:
-        res = _post_json(
-            url,
-            {**base_payload, "response_format": {"type": "json_object"}},
-            timeout_sec=timeout_sec,
-        )
-    except DeepSeekError as err:
-        # 部分模型/套餐不接受 response_format，400 时去掉 JSON 模式重试一次
-        err_text = str(err)
-        if "HTTP 400" in err_text or "HTTP 400:" in err_text:
-            res = _post_json(url, base_payload, timeout_sec=timeout_sec)
-        else:
-            raise
+    res = _post_json(url, payload, timeout_sec=timeout_sec)
     try:
         content = res["choices"][0]["message"]["content"]
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek 路由决策响应结构异常: {res}") from exc
+        raise DeepSeekError(f"DeepSeek 叙事响应结构异常: {res}") from exc
     if not isinstance(content, str):
-        raise DeepSeekError(f"DeepSeek 路由决策 content 非字符串: {content!r}")
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise DeepSeekError(f"DeepSeek 路由决策 content 不是 JSON: {content[:240]!r}") from exc
-    if not isinstance(parsed, dict):
-        raise DeepSeekError(f"DeepSeek 路由决策结果非对象: {parsed!r}")
-    return parsed
+        raise DeepSeekError(f"DeepSeek 叙事 content 非字符串: {content!r}")
+    text = content.strip()
+    if not text:
+        raise DeepSeekError("DeepSeek 叙事返回空正文")
+    return text

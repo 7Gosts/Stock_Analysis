@@ -19,7 +19,7 @@ from app.feishu_asset_catalog import (
 )
 from app.memory_store import JsonlMemoryStore, MemoryEvent
 from config.runtime_config import get_analysis_config
-from tools.deepseek.client import DeepSeekError, decide_message_action
+from tools.deepseek.client import DeepSeekError, decide_feishu_route, generate_feishu_narrative
 from tools.feishu.client import FeishuError, get_tenant_access_token, send_text_message
 _SEEN_MESSAGE_IDS: dict[str, float] = {}
 _MESSAGE_DEDUP_TTL_SEC = 10 * 60
@@ -30,6 +30,107 @@ _CONV_TTL_SEC = 30 * 60
 _DEFAULT_MEMORY_ROUNDS = 4
 _BOT_START_TS_MS = int(time.time() * 1000)
 _STARTUP_GRACE_MS = 5000
+_MAX_FEISHU_MESSAGE_CHARS = 4000
+
+
+def _feishu_narrative_enabled() -> bool:
+    env = os.getenv("FEISHU_USE_NARRATIVE_REPLY", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    cfg = get_analysis_config()
+    fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
+    return bool(fei.get("use_narrative_reply"))
+
+
+def _build_analysis_facts_for_narrative(result_payload: dict[str, Any]) -> dict[str, Any]:
+    analysis = result_payload.get("analysis_result") if isinstance(result_payload.get("analysis_result"), dict) else {}
+    meta = result_payload.get("meta") if isinstance(result_payload.get("meta"), dict) else {}
+    out: dict[str, Any] = {}
+    for key in (
+        "symbol",
+        "name",
+        "provider",
+        "interval",
+        "trend",
+        "last_price",
+        "fib_zone",
+        "regime_label",
+        "regime_confidence",
+        "decision_source",
+    ):
+        if key in analysis and analysis.get(key) is not None:
+            out[key] = analysis.get(key)
+    ft = analysis.get("fixed_template")
+    if isinstance(ft, dict) and ft:
+        out["fixed_template"] = ft
+    ms = analysis.get("ma_snapshot")
+    if isinstance(ms, dict) and ms:
+        out["ma_snapshot"] = ms
+    wy = analysis.get("wyckoff_123_v1")
+    if isinstance(wy, dict):
+        slim = {k: wy[k] for k in ("background", "preferred_side", "aligned", "selected_setup", "setups") if k in wy}
+        if slim:
+            out["wyckoff_123_v1"] = slim
+    rp = meta.get("risk_profile")
+    if isinstance(rp, str) and rp.strip():
+        out["risk_profile"] = rp.strip()
+    jn = meta.get("journal")
+    if isinstance(jn, dict) and jn.get("new_entries"):
+        out["journal_new_entries"] = jn.get("new_entries")
+    return out
+
+
+def _split_text_for_feishu_chunks(text: str, max_len: int = _MAX_FEISHU_MESSAGE_CHARS) -> list[str]:
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) <= max_len:
+        return [t]
+    parts: list[str] = []
+    buf: list[str] = []
+    acc = 0
+    for block in t.split("\n\n"):
+        extra = len(block) + (2 if buf else 0)
+        if acc + extra <= max_len:
+            buf.append(block)
+            acc += extra
+            continue
+        if buf:
+            parts.append("\n\n".join(buf))
+        buf = []
+        acc = 0
+        if len(block) <= max_len:
+            buf.append(block)
+            acc = len(block)
+        else:
+            for i in range(0, len(block), max_len):
+                parts.append(block[i : i + max_len])
+    if buf:
+        parts.append("\n\n".join(buf))
+    return parts if parts else [t[:max_len]]
+
+
+def feishu_reply_chunks(
+    result_payload: dict[str, Any],
+    *,
+    user_question: str | None = None,
+) -> list[str]:
+    """飞书展示：可选叙事 LLM，失败或未开启时用固定模板拼接；返回可逐条发送的文本块。"""
+    if _feishu_narrative_enabled():
+        try:
+            facts = _build_analysis_facts_for_narrative(result_payload)
+            if not facts.get("fixed_template") and not facts.get("symbol"):
+                raise ValueError("missing narrative facts")
+            body = generate_feishu_narrative(facts=facts, user_question=user_question)
+            chunks = _split_text_for_feishu_chunks(body)
+            if chunks:
+                return chunks
+        except Exception as exc:
+            logger.warning("[FeishuBot] narrative_reply_failed err={}", exc)
+    flat = format_fixed_template_reply(result_payload, user_question=user_question)
+    return _split_text_for_feishu_chunks(flat)
 
 
 def parse_user_message(
@@ -69,7 +170,8 @@ def analyze_multiple_symbols(*, api_base_url: str, payloads: list[dict[str, Any]
         try:
             task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
             result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
-            cards.append(format_fixed_template_reply(result))
+            chunks = feishu_reply_chunks(result, user_question=str(payload.get("question") or ""))
+            cards.append("\n\n".join(chunks))
         except Exception as exc:
             cards.append(f"{sym} 分析失败：{exc}")
     return "\n\n".join(cards)
@@ -535,46 +637,48 @@ def build_event_handler(
         _log_event("route", open_id=sender_open_id, action=str(route.get("action") or "unknown"))
         update_conversation_state(sender_open_id, route=route, raw_text=text)
         if route.get("action") == "clarify":
-            reply = str(route.get("clarify_message") or build_ambiguous_reply(text))
-            try:
-                token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                send_text_message(
-                    tenant_access_token=token,
-                    receive_id=sender_open_id,
+            reply = str(route.get("clarify_message") or "").strip()
+            if reply:
+                try:
+                    token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
+                    send_text_message(
+                        tenant_access_token=token,
+                        receive_id=sender_open_id,
+                        text=reply,
+                        receive_id_type="open_id",
+                    )
+                except FeishuError:
+                    pass
+                append_conversation_message(
+                    sender_open_id,
+                    role="assistant",
                     text=reply,
-                    receive_id_type="open_id",
+                    action="clarify",
+                    memory_store=memory_store,
                 )
-            except FeishuError:
-                pass
             _log_event("reply", open_id=sender_open_id, action="clarify", text=reply)
-            append_conversation_message(
-                sender_open_id,
-                role="assistant",
-                text=reply,
-                action="clarify",
-                memory_store=memory_store,
-            )
             return
         if route.get("action") == "chat":
-            reply = build_chat_reply(route.get("chat_reply"))
-            try:
-                token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                send_text_message(
-                    tenant_access_token=token,
-                    receive_id=sender_open_id,
+            reply = str(route.get("chat_reply") or "").strip()
+            if reply:
+                try:
+                    token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
+                    send_text_message(
+                        tenant_access_token=token,
+                        receive_id=sender_open_id,
+                        text=reply,
+                        receive_id_type="open_id",
+                    )
+                except FeishuError:
+                    pass
+                append_conversation_message(
+                    sender_open_id,
+                    role="assistant",
                     text=reply,
-                    receive_id_type="open_id",
+                    action="chat",
+                    memory_store=memory_store,
                 )
-            except FeishuError:
-                pass
             _log_event("reply", open_id=sender_open_id, action="chat", text=reply)
-            append_conversation_message(
-                sender_open_id,
-                role="assistant",
-                text=reply,
-                action="chat",
-                memory_store=memory_store,
-            )
             return
         if route.get("action") == "analyze_multi":
             payloads = route.get("payloads")
@@ -596,12 +700,13 @@ def build_event_handler(
                     interval_multi = iv
             try:
                 token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                send_text_message(
-                    tenant_access_token=token,
-                    receive_id=sender_open_id,
-                    text=reply,
-                    receive_id_type="open_id",
-                )
+                for ch in _split_text_for_feishu_chunks(reply):
+                    send_text_message(
+                        tenant_access_token=token,
+                        receive_id=sender_open_id,
+                        text=ch,
+                        receive_id_type="open_id",
+                    )
             except FeishuError:
                 pass
             _log_event("reply", open_id=sender_open_id, action="analyze_multi", text=reply)
@@ -642,17 +747,19 @@ def build_event_handler(
             task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
             _log_event("analyze_submit", open_id=sender_open_id, task_id=task_id, symbol=str(payload.get("symbol") or ""), interval=str(payload.get("interval") or ""))
             result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
-            reply = format_fixed_template_reply(result, user_question=text)
+            reply_chunks = feishu_reply_chunks(result, user_question=text)
         except Exception as exc:
-            reply = f"分析失败：{exc}"
+            reply_chunks = [f"分析失败：{exc}"]
+        reply = "\n\n".join(reply_chunks)
         try:
             token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-            send_text_message(
-                tenant_access_token=token,
-                receive_id=sender_open_id,
-                text=reply,
-                receive_id_type="open_id",
-            )
+            for ch in reply_chunks:
+                send_text_message(
+                    tenant_access_token=token,
+                    receive_id=sender_open_id,
+                    text=ch,
+                    receive_id_type="open_id",
+                )
         except FeishuError:
             # 回消息失败时不再抛出，避免影响 ws 主循环
             pass
@@ -781,15 +888,6 @@ def _feishu_asset_catalog() -> FeishuAssetCatalog:
     return get_catalog_for_repo(_feishu_repo_root())
 
 
-def build_router_symbol_clarify(raw: str, catalog: FeishuAssetCatalog) -> str:
-    sample = "、".join(sorted(catalog.allowed_symbols)[:12]) if catalog.allowed_symbols else "（配置中暂无标的）"
-    tip = (
-        f"路由给出的代码不在当前机器人支持的标的列表中（收到：{raw.strip() or '空'}）。\n"
-        f"请从 market_config 已配置的标的中选择并重试（示例）：{sample}"
-    )
-    return tip
-
-
 def _normalize_interval(value: str, default_interval: str) -> str:
     v = (value or "").strip().lower()
     if v in {"15m", "30m", "1h", "4h", "1d"}:
@@ -822,48 +920,6 @@ def _to_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return v
 
 
-def build_ambiguous_reply(text: str) -> str:
-    raw = (text or "").strip()
-    if raw:
-        return (
-            f"我没看懂你的问题（收到：{raw}）。\n"
-            "你可以这样问：\n"
-            "1) 看 NVDA 1d 或 BTC_USDT 4h\n"
-            "2) AU9999 1d 黄金节奏\n"
-            "3) 贵州茅台 1d 带研报\n"
-            "4) ETH 1d 左侧能不能开多？"
-        )
-    return (
-        "我没看懂你的问题。\n"
-        "你可以这样问：\n"
-        "1) 看 NVDA 1d 或 BTC_USDT 4h\n"
-        "2) AU9999 1d 黄金节奏\n"
-        "3) 贵州茅台 1d 带研报\n"
-        "4) ETH 1d 左侧能不能开多？"
-    )
-
-
-def build_missing_fields_reply(text: str) -> str:
-    raw = (text or "").strip()
-    if raw:
-        return (
-            f"我暂时不能直接执行分析（收到：{raw}）。\n"
-            "请补充：标的代码（须在 market_config 中）+ 周期（15m/30m/1h/4h/1d）。\n"
-            "例如：看 AAPL 1d；AU9999 4h；BTC_USDT 1d 带研报。"
-        )
-    return "请补充标的与周期（例如 NVDA 1d、AU9999 1d、BTC_USDT 4h）。"
-
-
-def build_router_error_reply(text: str) -> str:
-    raw = (text or "").strip()
-    if raw:
-        return (
-            f"我现在没能稳定解析你的请求（收到：{raw}）。\n"
-            "请明确给出标的与周期后重试，例如：600519.SH 1d 或 ETH_USDT 4h。"
-        )
-    return "我现在没能稳定解析请求，请明确给出标的与周期后重试。"
-
-
 def route_user_message(
     text: str,
     *,
@@ -872,7 +928,7 @@ def route_user_message(
     context: dict[str, Any] | None = None,
     recent_messages: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """意图由路由 LLM（decide_message_action）决定；代码只做标的表、周期合法值与 payload 落地。"""
+    """意图由路由 LLM（decide_feishu_route：仅 DeepSeek tools/function calling）决定；代码只做标的表、周期合法值与 payload 落地。"""
     raw = (text or "").strip()
     ctx = context if isinstance(context, dict) else {}
     catalog = _feishu_asset_catalog()
@@ -892,7 +948,7 @@ def route_user_message(
     base_interval = _normalize_interval(str(ctx.get("last_interval") or default_interval), default_interval)
 
     if not raw:
-        return {"action": "clarify", "clarify_message": build_missing_fields_reply(raw)}
+        return {"action": "clarify", "clarify_message": ""}
 
     payload = parse_user_message(
         raw,
@@ -902,7 +958,7 @@ def route_user_message(
     )
 
     try:
-        routed = decide_message_action(
+        routed = decide_feishu_route(
             text=raw,
             default_symbol=base_symbol,
             default_interval=base_interval,
@@ -911,17 +967,14 @@ def route_user_message(
         )
     except Exception as exc:
         _log_router_llm_failure(exc)
-        return {"action": "clarify", "clarify_message": build_router_error_reply(raw)}
+        return {"action": "clarify", "clarify_message": ""}
 
     _log_routed_llm_preview(routed)
 
     action = str(routed.get("action") or "").strip().lower()
     if action == "clarify":
         clarify_msg = str(routed.get("clarify_message") or "").strip()
-        return {
-            "action": "clarify",
-            "clarify_message": clarify_msg or build_ambiguous_reply(raw),
-        }
+        return {"action": "clarify", "clarify_message": clarify_msg}
     if action == "chat":
         chat_reply = str(routed.get("chat_reply") or "").strip()
         if chat_reply:
@@ -929,7 +982,7 @@ def route_user_message(
         return {"action": "chat"}
 
     if action not in {"analyze"}:
-        return {"action": "clarify", "clarify_message": build_ambiguous_reply(raw)}
+        return {"action": "clarify", "clarify_message": ""}
 
     routed_symbols = canonical_tradable_symbol_list(routed.get("symbols"), catalog)
     routed_interval = str(routed.get("interval") or "").strip().lower()
@@ -959,7 +1012,7 @@ def route_user_message(
     if single is None and len(routed_symbols) == 1:
         single = routed_symbols[0]
     if single is None:
-        return {"action": "clarify", "clarify_message": build_router_symbol_clarify(raw, catalog)}
+        return {"action": "clarify", "clarify_message": ""}
 
     payload["symbol"] = single
     payload["interval"] = _normalize_interval(routed_interval or str(payload.get("interval") or ""), payload["interval"])
@@ -1142,16 +1195,6 @@ def update_conversation_state(sender_open_id: str, *, route: dict[str, Any], raw
         else:
             st["pending_clarify"] = False
         _CONV_STATE[key] = st
-
-
-def build_chat_reply(chat_reply: Any) -> str:
-    cleaned = str(chat_reply or "").strip()
-    if cleaned:
-        return cleaned
-    return (
-        "可以闲聊呀 🙂\n"
-        "我也可以看股票/黄金/加密：例如“NVDA 1d”“AU9999 1d”“BTC_USDT 4h”，或“贵州茅台 1d 带研报”。"
-    )
 
 
 def _log_event(stage: str, **kwargs: Any) -> None:

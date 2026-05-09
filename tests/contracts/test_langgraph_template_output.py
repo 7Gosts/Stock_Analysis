@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,19 +38,7 @@ class _FakeLLM:
                     }
                 ],
             )
-        return AIMessage(
-            content=json.dumps(
-                {
-                    "综合倾向": "偏多",
-                    "关键位(Fib)": "0.618~0.786",
-                    "触发条件": "entry=80000",
-                    "失效条件": "stop=76000",
-                    "风险点": ["假突破风险"],
-                    "下次复核时间": "下一根4hK线收盘后",
-                },
-                ensure_ascii=False,
-            )
-        )
+        return AIMessage(content="")
 
 
 def _fake_tools(*, repo_root: Path):
@@ -113,7 +100,7 @@ class TestLangGraphTemplateOutput(unittest.TestCase):
         tpl = out["analysis_result"]["fixed_template"]
         self.assertTrue(all(k in tpl for k in REQUIRED_TEMPLATE_KEYS))
         self.assertIsInstance(tpl["风险点"], list)
-        self.assertEqual(out["analysis_result"]["decision_source"], "llm+rules")
+        self.assertEqual(out["analysis_result"]["decision_source"], "rules")
 
     def test_overview_fixed_template_overrides_llm_on_levels_trigger(self) -> None:
         fb = {

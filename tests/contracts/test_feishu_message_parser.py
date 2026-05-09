@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 import unittest
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from app.memory_store import JsonlMemoryStore, MemoryEvent
+from tools.deepseek.client import DeepSeekError, decide_feishu_route
+
 from app.feishu_bot_service import (
     _BOT_START_TS_MS,
     _CONV_STATE,
     _SEEN_MESSAGE_IDS,
-    build_ambiguous_reply,
     append_conversation_message,
     extract_message_create_time_ms,
     get_conversation_state,
@@ -74,7 +76,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_omitted_symbol_clarifies_not_default_btc(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "analyze", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -84,11 +86,11 @@ class TestFeishuMessageParser(unittest.TestCase):
                 context=None,
             )
         self.assertEqual(routed["action"], "clarify")
-        self.assertIn("不在当前机器人支持", routed.get("clarify_message", ""))
+        self.assertEqual(routed.get("clarify_message"), "")
 
     def test_route_invalid_symbol_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "FOO_USDT", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -98,17 +100,11 @@ class TestFeishuMessageParser(unittest.TestCase):
                 context=None,
             )
         self.assertEqual(routed["action"], "clarify")
-        self.assertIn("不在当前机器人支持", routed.get("clarify_message", ""))
-
-    def test_ambiguous_reply_template(self) -> None:
-        reply = build_ambiguous_reply("aaa")
-        self.assertIn("我没看懂你的问题", reply)
-        self.assertIn("BTC_USDT", reply)
-        self.assertIn("NVDA", reply)
+        self.assertEqual(routed.get("clarify_message"), "")
 
     def test_route_user_message_clarify_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "clarify", "clarify_message": "请补充标的和周期"},
         ):
             routed = route_user_message(
@@ -123,7 +119,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_route_user_message_analyze_by_router(self) -> None:
         with (
             patch(
-                "app.feishu_bot_service.decide_message_action",
+                "app.feishu_bot_service.decide_feishu_route",
                 return_value={
                     "action": "analyze",
                     "symbol": "ETH_USDT",
@@ -146,7 +142,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_bare_eth_lands_to_eth_usdt(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "ETH", "interval": "4h", "question": "短线"},
         ):
             routed = route_user_message(
@@ -160,7 +156,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_unknown_action_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "noop", "symbol": "BTC_USDT"},
         ):
             routed = route_user_message(
@@ -173,7 +169,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_user_message_chat_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "chat", "chat_reply": "你好呀，我在呢"},
         ):
             routed = route_user_message(
@@ -187,7 +183,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_user_message_multi_symbols_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -210,7 +206,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_nvda_tickflow_with_research(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "NVDA",
@@ -236,7 +232,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_multi_mixed_providers(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["NVDA", "BTC_USDT", "AU9999"],
@@ -289,7 +285,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_followup_uses_context(self) -> None:
         ctx = {"last_symbol": "ETH_USDT", "last_interval": "1h", "last_question": "看下ETH走势"}
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "ETH_USDT",
@@ -337,7 +333,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_router_receives_recent_messages(self) -> None:
         recent = [{"role": "user", "text": "看下BTC 4h"}]
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "chat", "chat_reply": "收到"},
         ) as mocked:
             route_user_message(
@@ -371,7 +367,7 @@ class TestFeishuMessageParser(unittest.TestCase):
             self.assertEqual(st.get("last_interval"), "4h")
 
     def test_strict_mode_router_error_goes_clarify(self) -> None:
-        with patch("app.feishu_bot_service.decide_message_action", side_effect=RuntimeError("x")):
+        with patch("app.feishu_bot_service.decide_feishu_route", side_effect=RuntimeError("x")):
             routed = route_user_message(
                 "看下走势",
                 default_symbol="BTC_USDT",
@@ -379,10 +375,11 @@ class TestFeishuMessageParser(unittest.TestCase):
                 context=None,
             )
         self.assertEqual(routed["action"], "clarify")
+        self.assertEqual(routed.get("clarify_message"), "")
 
     def test_analyze_missing_symbol_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -392,7 +389,7 @@ class TestFeishuMessageParser(unittest.TestCase):
                 context=None,
             )
         self.assertEqual(routed["action"], "clarify")
-        self.assertIn("不在当前机器人支持", routed.get("clarify_message", ""))
+        self.assertEqual(routed.get("clarify_message"), "")
 
     def test_empty_text_goes_clarify(self) -> None:
         routed = route_user_message(
@@ -402,10 +399,11 @@ class TestFeishuMessageParser(unittest.TestCase):
             context=None,
         )
         self.assertEqual(routed["action"], "clarify")
+        self.assertEqual(routed.get("clarify_message"), "")
 
     def test_natural_language_all_request_goes_multi(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -426,7 +424,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_natural_language_crypto_generic_goes_multi(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -444,7 +442,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_first_choice_after_clarify(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_message_action",
+            "app.feishu_bot_service.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "BTC_USDT",
@@ -460,6 +458,97 @@ class TestFeishuMessageParser(unittest.TestCase):
             )
         self.assertEqual(routed["action"], "analyze")
         self.assertEqual(routed["payload"]["symbol"], "BTC_USDT")
+
+    def test_decide_feishu_route_parses_analyze_tool(self) -> None:
+        fake_resp = {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "analyze_market",
+                                    "arguments": '{"symbol":"ETH_USDT","interval":"1d","question":"日线"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        with patch("tools.deepseek.client._post_json", return_value=fake_resp):
+            r = decide_feishu_route(
+                text="看下eth日线",
+                default_symbol="BTC_USDT",
+                default_interval="4h",
+                tradable_assets=[],
+            )
+        self.assertEqual(r["action"], "analyze")
+        self.assertEqual(r["symbol"], "ETH_USDT")
+        self.assertEqual(r["interval"], "1d")
+
+    def test_decide_feishu_route_hello_user_content_only_no_tool_calls(self) -> None:
+        """模拟：飞书用户发「你好」，DeepSeek 未调 tools，只在 message.content 里回寒暄（真实 API 常见形态）。"""
+        # chat/completions 典型片段：无 tool_calls，仅有 assistant 正文（可能被写成闲聊而未触发 reply_chat）
+        fake_deepseek_json = {
+            "id": "cmpl-feishu-sim",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            "你好！我是行情分析助手，可以说下想看的标的和周期，"
+                            "例如 NVDA 1d、BTC_USDT 4h、AU9999 1d。"
+                        ),
+                        # 注意：无 tool_calls 或 tool_calls 为空时走正文兜底 → route 解析为 action=chat
+                    },
+                }
+            ],
+        }
+        with patch("tools.deepseek.client._post_json", return_value=fake_deepseek_json):
+            r = decide_feishu_route(
+                text="你好",
+                default_symbol="BTC_USDT",
+                default_interval="4h",
+                tradable_assets=[],
+            )
+        # 本地跑单测时可直接看到解析结果（unittest 默认成功用例不打印断言对象）
+        print(
+            "\n[模拟飞书发「你好」] DeepSeek 无 tool_calls，仅用 message.content → route_user_message 等价结构：\n"
+            + json.dumps(r, ensure_ascii=False, indent=2)
+            + "\n",
+            flush=True,
+        )
+        self.assertEqual(r["action"], "chat")
+        self.assertEqual(
+            r["chat_reply"],
+            "你好！我是行情分析助手，可以说下想看的标的和周期，例如 NVDA 1d、BTC_USDT 4h、AU9999 1d。",
+        )
+
+    def test_decide_feishu_route_returns_chat_from_raw_content_when_no_tools(self) -> None:
+        fake_resp = {"choices": [{"message": {"content": "  Hi，有什么可以帮你？ "}}]}
+        with patch("tools.deepseek.client._post_json", return_value=fake_resp):
+            r = decide_feishu_route(
+                text="你好啊",
+                default_symbol="BTC_USDT",
+                default_interval="4h",
+                tradable_assets=[],
+            )
+        self.assertEqual(r["action"], "chat")
+        self.assertEqual(r["chat_reply"], "Hi，有什么可以帮你？")
+
+    def test_decide_feishu_route_raises_when_no_tool_calls_and_no_content(self) -> None:
+        fake_resp = {"choices": [{"message": {}}]}
+        with patch("tools.deepseek.client._post_json", return_value=fake_resp):
+            with self.assertRaises(DeepSeekError):
+                decide_feishu_route(
+                    text="hi",
+                    default_symbol="BTC_USDT",
+                    default_interval="4h",
+                )
 
 
 if __name__ == "__main__":

@@ -68,16 +68,13 @@ feishu:
     history_days: 30
     long_term_top_k: 3
   llm_memory_rounds: 4 # 传给路由模型的最近对话轮数（1轮=用户+机器人）
-  # 路由行为仅由此 system 描述（勿再在代码里加 rules 列表）；以下为示例，可按业务改写。
-  llm_router_system_prompt: |
-    你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报）。
-    你必须只输出一个 JSON 对象（不要 Markdown、不要代码围栏）。
-    字段：action、symbol、symbols、interval、question、provider、with_research、research_keyword、clarify_message、chat_reply。
-    用户消息 JSON 中会附带 tradable_assets（来自 config/market_config.json，每项含 symbol、market、provider、name）；
-    analyze 时 symbol / symbols 只能从中选取；provider 必须与所选 symbol 在 tradable_assets 中的 provider 一致。
-    with_research：用户明确要看研报/机构观点时为 true；research_keyword 为研报检索关键词（可选）。
-    action 为 analyze|clarify|chat；analyze 时单标的填 symbol，多标的填 symbols（至少 2 项）；裸代码 eth/btc/sol 须映射为 tradable_assets 中存在的 *_USDT。
-    interval 仅 15m/30m/1h/4h/1d；不要编造成交或主力资金。
+  # 路由仅支持 DeepSeek function calling（tools）；勿要求模型输出裸 JSON。留空则用代码内默认。
+  llm_router_system_prompt: ""
   llm_router_temperature: 0.0
+  # 为 true 时，飞书回复用 DeepSeek 将分析结果 JSON 转为口语化长文；失败则回退固定模板。也可用环境变量 FEISHU_USE_NARRATIVE_REPLY=1
+  use_narrative_reply: false
+  narrative_temperature: 0.35
+  # 可选：覆盖默认叙事 system 提示；留空则用 tools/deepseek 内建 DEFAULT_FEISHU_NARRATIVE_SYSTEM
+  narrative_system_prompt: ""
   # 用户说「短线」且未写具体周期时，路由 LLM 使用的默认 interval（合法值之一）
   short_term_interval: "4h"

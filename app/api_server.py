@@ -23,7 +23,7 @@ class AnalyzeRequest(BaseModel):
     question: str | None = Field(default=None, description="可选：触发RAG检索的问题")
     use_rag: bool = Field(default=True)
     rag_top_k: int = Field(default=5, ge=1, le=20)
-    use_llm_decision: bool = Field(default=True, description="是否启用 DeepSeek 决策层")
+    use_llm_decision: bool = Field(default=True, description="必须为 True：分析仅支持 LangGraph + DeepSeek")
     risk_profile: str | None = Field(default=None, description="可选：风险画像（如 保守/均衡/进取 或 单笔亏损阈值）")
 
 
