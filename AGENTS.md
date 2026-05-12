@@ -96,7 +96,7 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 
 ## 5) 台账与执行（易错点）
 
-- `output/trade_journal.jsonl` 为程序生成的 **结构/候选快照**，**不是**交易所成交回报。  
+- **PostgreSQL** `journal_ideas` 等为程序生成的 **结构/候选快照**，**不是**交易所成交回报。  
 - 写入前受 `config/analysis_defaults.yaml`（`min_journal_rr`、可选 `journal_quality`）及 `analysis/journal_policy.py` 约束；**RR 达标 ≠ 可下单**。  
 - 详细条文与回顾流程：`AI_股票对话提示.md` **§7** 及其中「台账与执行层边界」。
 

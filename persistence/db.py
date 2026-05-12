@@ -1,4 +1,4 @@
-"""PostgreSQL 连接池（仅当 database.backend 非纯 jsonl 时创建）。"""
+"""PostgreSQL 连接池（配置 `database.postgres.dsn` 时创建）。"""
 from __future__ import annotations
 
 from typing import Any
@@ -10,13 +10,10 @@ _engine: Engine | None = None
 
 
 def get_sqlalchemy_engine() -> Engine | None:
-    """返回全局 Engine；backend=jsonl 时返回 None。"""
+    """返回全局 Engine；未配置 database.postgres.dsn 时返回 None。"""
     global _engine
-    from config.runtime_config import get_database_backend, get_postgres_dsn
+    from config.runtime_config import get_postgres_dsn
 
-    backend = get_database_backend()
-    if backend == "jsonl":
-        return None
     dsn = get_postgres_dsn()
     if not dsn:
         return None

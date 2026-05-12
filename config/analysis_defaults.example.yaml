@@ -1,7 +1,7 @@
 # 跨资产默认参数（模板）
 # 复制为 config/analysis_defaults.yaml 后在本地按需修改。
 
-# 写入 trade_journal.jsonl 前的最小盈亏比（与 CryptoTradeDesk 口径一致：|TP1-entry|/|entry-stop|）
+# 写入 PostgreSQL journal_ideas 前的最小盈亏比（与 CryptoTradeDesk 口径一致：|TP1-entry|/|entry-stop|）
 min_journal_rr: 1.2
 
 # 可选质量门：enabled 为 false 时仅 RR 门槛生效（默认保守关闭）
@@ -91,6 +91,7 @@ agent:
 
 # 纸交易头寸：按 market 映射币种账本；qty = (balance * max_loss_pct) / |entry - stop|
 # CN/A 股与贵金属(PM)走 CNY；美股与加密货币(CRYPTO)走 USD；HK 默认 USD；未知 market 默认 USD。
+# 多币种账户：initial_balance / balance 供头寸公式；`alembic upgrade head` 的 journal_004 会按本块为 PG account_ledger 写入首条 reason=init（仅当该币种尚无账本行）
 accounts:
   CNY:
     balance: 500000
@@ -101,9 +102,15 @@ accounts:
     max_loss_pct: 0.02
     qty_step: 0.0001
 
-# 台账存储：默认 jsonl；迁移期 dualwrite（JSONL 主路径，PG 观测）
+# 账户账本（能连 PG 时写 account_ledger；无引擎时为 no-op）
+account_system:
+  auto_sync_to_journal_ideas: true
+  mark_to_market_interval_seconds: 3600
+  simulation_mode: true
+  fee_bps: 0
+
+# 台账与纸交易：PostgreSQL（需 database.postgres.dsn）
 database:
-  backend: "jsonl"
   postgres:
     dsn: "postgresql+psycopg://stock_user:stock_pass@127.0.0.1:5432/stock_analysis"
     pool_size: 5
@@ -111,5 +118,3 @@ database:
     pool_pre_ping: true
     pool_recycle: 1800
     echo: false
-  dualwrite:
-    rollback_jsonl_on_pg_failure: false

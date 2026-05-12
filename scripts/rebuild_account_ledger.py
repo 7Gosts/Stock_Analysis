@@ -28,19 +28,14 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.position_sizing import map_market_to_currency
-from app.db import get_sqlalchemy_engine
-from config.runtime_config import get_database_backend, get_account_initial_balance
+from persistence.db import get_sqlalchemy_engine
+from config.runtime_config import get_account_initial_balance
 
 
 def rebuild_ledger_for_currency(currency: str, *, dry_run: bool = False) -> None:
-    backend = get_database_backend()
-    if backend not in {"postgres", "dualwrite"}:
-        logger.warning("[Rebuild] No DB backend; skipping")
-        return
-
     engine = get_sqlalchemy_engine()
     if engine is None:
-        logger.error("[Rebuild] No engine")
+        logger.warning("[Rebuild] No PostgreSQL engine; skipping")
         return
 
     initial_balance = get_account_initial_balance(currency)

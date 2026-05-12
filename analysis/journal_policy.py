@@ -56,7 +56,7 @@ def calc_journal_rr(idea: dict[str, Any]) -> float | None:
 
 
 def idea_passes_journal_append_gates(idea: dict[str, Any]) -> tuple[bool, str]:
-    """写入 trade_journal.jsonl 前：RR 门槛 + 可选 journal_quality。"""
+    """写入台账（PostgreSQL）前：RR 门槛 + 可选 journal_quality。"""
     rr = idea.get("rr")
     if rr is None:
         rr = calc_journal_rr(idea)

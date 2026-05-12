@@ -161,15 +161,14 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 
 ## 7) 交易台账回顾（若存在）
 
-若存在以下文件，先简短回顾再进入行情解读：
+若已配置 PostgreSQL 台账，可先简短回顾再进入行情解读：
 
-- `output/trade_journal.jsonl`
-- `output/trade_journal_stats_latest.md`
-- `output/trade_journal_stats_latest.json`
+- 数据源：`journal_ideas`（程序生成的 **结构/候选快照**，**不是**交易所成交回报）
+- 同会话目录下可读统计（若已生成）：`trade_journal_stats_latest.md`、`trade_journal_readable.md`
 
 回顾内容至少包含：近7天/近30天候选单数量、命中率、止盈率、止损率。
 
-**台账与执行层边界（强制）**：`trade_journal.jsonl` 仅记录程序根据 123 /（加密）MA 波段规则生成的 **候选价位与状态**；写入前受 **`config/analysis_defaults.yaml`** 中 **`min_journal_rr`** 与可选 **`journal_quality`** 过滤，**RR 达标不代表可实盘下单**。解读时不得把台账字段等同于「已成交」或唯一执行单；情景化仓位与开单仍须按本文其它章节与用户风险画像单独演算。
+**台账与执行层边界（强制）**：台账记录程序根据 123 /（加密）MA 波段规则生成的 **候选价位与状态**；写入前受 **`config/analysis_defaults.yaml`** 中 **`min_journal_rr`** 与可选 **`journal_quality`** 过滤，**RR 达标不代表可实盘下单**。解读时不得把台账字段等同于「已成交」或唯一执行单；情景化仓位与开单仍须按本文其它章节与用户风险画像单独演算。
 
 ## 8) 合规口径（文末固定）
 

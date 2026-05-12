@@ -1,4 +1,4 @@
-"""模拟委托 / 成交（仅 PostgreSQL；jsonl backend 为 no-op）。"""
+"""模拟委托 / 成交（仅 PostgreSQL；无 DSN 时为 no-op）。"""
 from __future__ import annotations
 
 import hashlib
@@ -11,14 +11,12 @@ from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from app.db import get_sqlalchemy_engine
+from persistence.db import get_sqlalchemy_engine
 from analysis.trade_journal import parse_iso_utc
 
 
 def _paper_backend_enabled() -> bool:
-    from config import runtime_config
-
-    return runtime_config.get_database_backend() in {"postgres", "dualwrite"}
+    return get_sqlalchemy_engine() is not None
 
 
 def _engine() -> Engine | None:
@@ -301,7 +299,7 @@ def create_exit_fill(idea: dict[str, Any], *, close_reason: str, now_utc: dateti
 
 
 def fetch_paper_trade_monitor() -> dict[str, Any] | None:
-    """PG 全局对账计数；非 postgres/dualwrite 或无 engine 时返回 None。"""
+    """PG 全局对账计数；非 postgres 或无 engine 时返回 None。"""
     eng = _engine()
     if eng is None:
         return None

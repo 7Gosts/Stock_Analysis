@@ -1,6 +1,6 @@
 import pytest
 
-from app import account_service
+from persistence import account_service
 
 
 def test_get_or_init_account_returns_balance():

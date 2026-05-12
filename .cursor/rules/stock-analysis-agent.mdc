@@ -42,6 +42,6 @@ alwaysApply: true
   3) `output/<provider>/<market>/<本地日期>/full_report.md`
 - 输出顺序固定为：先逐标的解读，再跨标的总结。
 - 每个标的解读至少包含：综合倾向、关键位（含 Fib 区间）、触发条件、风险点、免责声明；**已建立风险画像时**还须包含情景化仓位与开单建议（见 `AI_股票对话提示.md` §3.1）。全文解读末尾须包含 **建议下次复核时间**（见 `AI_股票对话提示.md` §6 与 `AGENTS.md` §2 步骤 E）。
-- **台账**：`output/trade_journal.jsonl` 为 **结构快照**（非交易所成交）；写入前经 `config/analysis_defaults.yaml` 的 `min_journal_rr` 与可选 `journal_quality`，逻辑见 `analysis/journal_policy.py`。加密 / `gateio` 可并存 **`tactical` 与 `swing`** 两条候选（分槽去重）。RR 过滤不保证可执行。
+- **台账**：**PostgreSQL** `journal_*` 存结构快照（非交易所成交）；写入前经 `config/analysis_defaults.yaml` 的 `min_journal_rr` 与可选 `journal_quality`，逻辑见 `analysis/journal_policy.py`。加密 / `gateio` 可并存 **`tactical` 与 `swing`** 两条候选（分槽去重）。RR 过滤不保证可执行。
 - 合规口径：仅作技术分析与程序化演示，不构成投资建议。
 - 数据源默认 `tickflow`；若用户指定可切换 `gateio`（加密）或 **`goldapi`**（贵金属，默认内置 appkey；`--symbol` 用配置里贵金属标的如 `AU9999`）。

@@ -63,7 +63,7 @@
 | L1 | **未覆盖** | 需新增组合/账户配置与风控边界模块（若做）。 |
 | L2 | **弱** | 研报线索可辅助「找材料」，不是深度基本面引擎。 |
 | L3 | **已覆盖（偏技术）** | `analysis/kline_metrics.py`（威科夫 + 123、Fib、多周期 `mtf_v1`、结构过滤 `structure_filters_v1`、时间止损元数据等）；`cli/stock_analysis.py` 生成简报与 `ai_overview.json`。 |
-| L4 | **已覆盖** | `output/trade_journal.jsonl`、`analysis/ledger_stats.py`（周/月统计、按 status / `wyckoff_bias` 分层、时间止损过期挂单提示等）；可读 Markdown 快照。 |
+| L4 | **已覆盖** | PostgreSQL `journal_*`、`analysis/ledger_stats.py`（周/月统计、按 status / `wyckoff_bias` 分层、时间止损过期挂单提示等）；可读 Markdown 快照。 |
 
 ---
 
@@ -80,7 +80,7 @@
 | 需求方向 | 现状 | 相关路径（便于排期） |
 |----------|------|----------------------|
 | L3 价位、结构、简报 | 已有 | `analysis/kline_metrics.py`、`cli/stock_analysis.py`、`output/<UTC日期>/` |
-| L4 记录与统计 | 已有 | `output/trade_journal.jsonl`、`analysis/ledger_stats.py` |
+| L4 记录与统计 | 已有 | PostgreSQL `journal_*`、`analysis/ledger_stats.py` |
 | L2 深度基本面 | 弱 | `intel/yanbaoke_client.py`、`tools/yanbaoke/` |
 | L1 组合回撤、风险值、蒙特卡洛 | 未做 | 待新建模块（建议与 `analysis/` 并列，如 `portfolio/` 或 `risk/`） |
 | 自动交易 | 未做 | 非首期；若未来做，独立服务 + 审批流，不接在现 CLI 默认同一路径 |

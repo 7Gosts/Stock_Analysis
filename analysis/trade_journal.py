@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .beijing_time import to_beijing
@@ -22,29 +20,6 @@ def parse_iso_utc(ts: str | None) -> datetime | None:
 
 def to_iso_local(dt: datetime) -> str:
     return to_beijing(dt).replace(microsecond=0).isoformat()
-
-
-def load_journal(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        try:
-            obj = json.loads(s)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
-
-
-def save_journal(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(json.dumps(x, ensure_ascii=False) for x in entries)
-    path.write_text((body + "\n") if body else "", encoding="utf-8")
 
 
 def has_active_idea(

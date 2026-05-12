@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from config.runtime_config import get_accounts_config
+from persistence.db import get_sqlalchemy_engine
 
 _RISK_EPS = 1e-12
 
@@ -83,11 +84,27 @@ def calculate_qty_for_idea(idea: dict[str, Any], account_ledger: dict[str, Any] 
             "reason": "no_account_for_currency",
         }
 
-    # allow dynamic available balance from account_ledger snapshot
+    # 显式传入 account_ledger.available 时优先；有 PG 引擎时用 get_available_balance，否则用 YAML accounts
+    balance_source: str
     if account_ledger and isinstance(account_ledger.get("available"), (int, float)):
         balance = float(account_ledger.get("available"))
+        balance_source = "caller"
+    elif get_sqlalchemy_engine() is not None:
+        from persistence import account_service as _acct_svc
+
+        snap = _acct_svc.get_or_init_account(currency)
+        if snap.get("ledger_missing"):
+            return 1.0, {
+                **base_detail,
+                "fallback": True,
+                "reason": "ledger_not_initialized",
+                "hint": "请执行 alembic upgrade head（含 journal_004），按 YAML accounts 写入 account_ledger；或手工插入 reason=\"init\" 行。",
+            }
+        balance = float(snap.get("available") or 0.0)
+        balance_source = "database"
     else:
         balance = _safe_float(acct.get("initial_balance") or acct.get("balance"))
+        balance_source = "config"
     max_loss_pct = _safe_float(acct.get("max_loss_pct"))
     qty_step = _safe_float(acct.get("qty_step")) or 0.0001
 
@@ -128,6 +145,7 @@ def calculate_qty_for_idea(idea: dict[str, Any], account_ledger: dict[str, Any] 
 
     detail: dict[str, Any] = {
         **base_detail,
+        "balance_source": balance_source,
         "balance": balance,
         "max_loss_pct": max_loss_pct,
         "max_loss_amount": max_loss_amount,

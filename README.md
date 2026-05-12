@@ -19,7 +19,7 @@
 
 ## 架构要点
 
-- **分层**：`cli/` 只做入口与参数；`app/` 编排、报告写入、台账服务；`analysis/` 指标与业务规则（`price_feeds` 仅负责 provider 分发与 OHLCV 归一化）；`tools/<provider>/` 存放各数据源 HTTP 客户端。
+- **分层**：`cli/` 只做入口与参数；`app/` 编排、报告写入、**应用侧**台账流程（`journal_service` 等）；**`persistence/`** 集中 PostgreSQL 连接、台账仓库、账户与纸交易写入；`analysis/` 指标与业务规则（`price_feeds` 仅负责 provider 分发与 OHLCV 归一化）；`tools/<provider>/` 存放各数据源 HTTP 客户端。
 - **外部数据**：行情请求不写在 `analysis/` 内部实现里，而是通过 `tools/` 与 `price_feeds` 接入。
 - **可选 LLM**：分析链路可接入 DeepSeek（决策与校验见 `app/`、`tools/deepseek/`）；路由层另有飞书意图路由（function calling）。
 - **预留域**：`market_data/` 计划承接板块/资金流等结构化数据，当前未实现。
@@ -115,7 +115,7 @@ python cli/stock_analysis.py --market-brief --report-only --out-dir output --wit
 python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --limit 180 --report-only --out-dir output
 ```
 
-台账统计（独立）：`python analysis/ledger_stats.py --journal output/trade_journal.jsonl`
+台账统计（独立）：`python analysis/ledger_stats.py --journal output/tickflow/US_STOCK/2026-01-01/journal`（`--journal` 为**会话目录**下的锚点文件路径，统计 Markdown 写在同目录；台账行来自 PostgreSQL `journal_ideas`）
 
 启用 `--with-research` 时，研报目录与 CLI 约定一致（与单独 `cli/yb_search.py` 的落盘路径可能不同，以脚本说明为准）。
 
@@ -124,7 +124,7 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 ## 输出与指标（简要）
 
 - **指标示例**：SMA、窗口涨跌、 swing 高/低、Fib、趋势标签、Wyckoff 背景、123 结构字段等（具体字段以生成 JSON/Markdown 为准）。
-- **台账**：`output/trade_journal.jsonl` 为程序生成的结构快照，非交易所成交；写入规则见 `analysis/journal_policy.py` 与配置中的 `min_journal_rr` 等。
+- **台账**：**PostgreSQL** `journal_*`（需 `database.postgres.dsn`）；各次分析会话目录下有锚点文件 `journal` 及统计快照 `trade_journal_stats_latest.md` 等；非交易所成交；写入规则见 `analysis/journal_policy.py` 与配置中的 `min_journal_rr` 等。
 
 ---
 
@@ -185,4 +185,6 @@ python cli/stock_analysis.py --provider goldapi --symbol AU9999 --interval 1d --
 | `AGENTS.md` | Agent 数据源角色与路由约定 |
 | `AI_股票对话提示.md` | 长文契约与公式引用 |
 | `docs/NAMESPACE.md` | 模块与文件索引 |
+| `docs/DATABASE_DESIGN.md` | PostgreSQL 业务表结构、迁移链与生命周期摘要 |
+| `docs/SQL_AI_REFERENCE.md` | 常用只读 SQL（账户余额、持仓、纸单/成交、台账状态等）与 `sql/` 加载说明 |
 | `.cursor/rules/stock-analysis-agent.mdc` | IDE 内规则（若使用 Cursor） |

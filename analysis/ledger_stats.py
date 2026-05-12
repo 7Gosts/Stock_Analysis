@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from analysis.beijing_time import format_beijing
-from app.journal_repository_factory import load_journal_entries_for_stats
+from persistence.journal_repository_factory import load_journal_entries_for_stats
 from config.runtime_config import get_journal_action_thresholds
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -361,7 +361,7 @@ def build_stats_payload(entries: list[dict[str, Any]], now_utc: datetime | None 
         "breakdown_30d": period_breakdown(entries, now_utc=now, days=30),
     }
     try:
-        from app.paper_trade_service import fetch_paper_trade_monitor
+        from persistence.paper_trade_service import fetch_paper_trade_monitor
 
         pm = fetch_paper_trade_monitor()
         if pm is not None:
@@ -465,7 +465,7 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
         lines.append(
             f"- `closed`(tp/sl) 但无出场 fill（fill_seq=2）：**{pm.get('closed_idea_without_exit_fill_count', 0)}**\n\n"
         )
-        lines.append("说明：仅 `database.backend` 为 `postgres` 或 `dualwrite` 且能连库时统计；纯 `jsonl` 模式无此项。\n")
+        lines.append("说明：仅 PostgreSQL 已配置且能连库时统计纸交易对账段；无引擎则无此项。\n")
     return "".join(lines)
 
 
@@ -527,7 +527,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="股票交易台账周/月统计")
     p.add_argument(
         "--journal",
-        default=str(_REPO_ROOT / "output" / "trade_journal.jsonl"),
+        default=str(_REPO_ROOT / "output" / "journal"),
         help="台账文件路径",
     )
     p.add_argument("--json", action="store_true", help="输出 JSON")

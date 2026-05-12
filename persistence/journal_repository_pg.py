@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from app.db import get_sqlalchemy_engine
+from persistence.db import get_sqlalchemy_engine
+from persistence.sql_loader import load_sql_text
 from analysis.trade_journal import has_active_idea as _has_active_idea
 
 
@@ -25,106 +25,15 @@ def _dump_json(val: Any) -> str | None:
     return json.dumps(val, ensure_ascii=False)
 
 
-_IDEA_INSERT_SQL = text(
-    """
-    INSERT INTO journal_ideas (
-      idea_id, symbol, asset_name, market, provider, interval,
-      plan_type, direction, status, exit_status,
-      entry_type, order_kind_cn,
-      entry_price, entry_zone_low, entry_zone_high, signal_last, stop_loss,
-      tp1, tp2, rr,
-      wyckoff_bias, mtf_aligned, structure_flags, tags,
-      strategy_reason, lifecycle_v1, meta,
-      created_at, updated_at, valid_until, filled_at, closed_at,
-      fill_price, closed_price, realized_pnl_pct, unrealized_pnl_pct
-    ) VALUES (
-      :idea_id, :symbol, :asset_name, :market, :provider, :interval,
-      :plan_type, :direction, :status, :exit_status,
-      :entry_type, :order_kind_cn,
-      :entry_price, :entry_zone_low, :entry_zone_high, :signal_last, :stop_loss,
-      :tp1, :tp2, :rr,
-      :wyckoff_bias, :mtf_aligned, CAST(:structure_flags AS jsonb), CAST(:tags AS jsonb),
-      :strategy_reason, CAST(:lifecycle_v1 AS jsonb), CAST(:meta AS jsonb),
-      CAST(:created_at AS timestamptz), CAST(:updated_at AS timestamptz),
-      CAST(:valid_until AS timestamptz), CAST(:filled_at AS timestamptz), CAST(:closed_at AS timestamptz),
-      :fill_price, :closed_price, :realized_pnl_pct, :unrealized_pnl_pct
-    )
-    """
-)
-
-
-_IDEA_UPSERT_SQL = text(
-    """
-    INSERT INTO journal_ideas (
-      idea_id, symbol, asset_name, market, provider, interval,
-      plan_type, direction, status, exit_status,
-      entry_type, order_kind_cn,
-      entry_price, entry_zone_low, entry_zone_high, signal_last, stop_loss,
-      tp1, tp2, rr,
-      wyckoff_bias, mtf_aligned, structure_flags, tags,
-      strategy_reason, lifecycle_v1, meta,
-      created_at, updated_at, valid_until, filled_at, closed_at,
-      fill_price, closed_price, realized_pnl_pct, unrealized_pnl_pct
-    ) VALUES (
-      :idea_id, :symbol, :asset_name, :market, :provider, :interval,
-      :plan_type, :direction, :status, :exit_status,
-      :entry_type, :order_kind_cn,
-      :entry_price, :entry_zone_low, :entry_zone_high, :signal_last, :stop_loss,
-      :tp1, :tp2, :rr,
-      :wyckoff_bias, :mtf_aligned, CAST(:structure_flags AS jsonb), CAST(:tags AS jsonb),
-      :strategy_reason, CAST(:lifecycle_v1 AS jsonb), CAST(:meta AS jsonb),
-      CAST(:created_at AS timestamptz), CAST(:updated_at AS timestamptz),
-      CAST(:valid_until AS timestamptz), CAST(:filled_at AS timestamptz), CAST(:closed_at AS timestamptz),
-      :fill_price, :closed_price, :realized_pnl_pct, :unrealized_pnl_pct
-    )
-    ON CONFLICT (idea_id) DO UPDATE SET
-      symbol = EXCLUDED.symbol,
-      asset_name = EXCLUDED.asset_name,
-      market = EXCLUDED.market,
-      provider = EXCLUDED.provider,
-      interval = EXCLUDED.interval,
-      plan_type = EXCLUDED.plan_type,
-      direction = EXCLUDED.direction,
-      status = EXCLUDED.status,
-      exit_status = EXCLUDED.exit_status,
-      entry_type = EXCLUDED.entry_type,
-      order_kind_cn = EXCLUDED.order_kind_cn,
-      entry_price = EXCLUDED.entry_price,
-      entry_zone_low = EXCLUDED.entry_zone_low,
-      entry_zone_high = EXCLUDED.entry_zone_high,
-      signal_last = EXCLUDED.signal_last,
-      stop_loss = EXCLUDED.stop_loss,
-      tp1 = EXCLUDED.tp1,
-      tp2 = EXCLUDED.tp2,
-      rr = EXCLUDED.rr,
-      wyckoff_bias = EXCLUDED.wyckoff_bias,
-      mtf_aligned = EXCLUDED.mtf_aligned,
-      structure_flags = EXCLUDED.structure_flags,
-      tags = EXCLUDED.tags,
-      strategy_reason = EXCLUDED.strategy_reason,
-      lifecycle_v1 = EXCLUDED.lifecycle_v1,
-      meta = EXCLUDED.meta,
-      created_at = EXCLUDED.created_at,
-      updated_at = EXCLUDED.updated_at,
-      valid_until = EXCLUDED.valid_until,
-      filled_at = EXCLUDED.filled_at,
-      closed_at = EXCLUDED.closed_at,
-      fill_price = EXCLUDED.fill_price,
-      closed_price = EXCLUDED.closed_price,
-      realized_pnl_pct = EXCLUDED.realized_pnl_pct,
-      unrealized_pnl_pct = EXCLUDED.unrealized_pnl_pct
-    """
-)
-
-
+_IDEA_INSERT_SQL = load_sql_text("journal/idea_insert.sql")
+_IDEA_UPSERT_SQL = load_sql_text("journal/idea_upsert.sql")
 class PostgresJournalRepository:
-    """PostgreSQL 台账；与 JSONL 行字典字段对齐（便于 trade_journal / ledger_stats）。"""
+    """PostgreSQL 台账；行字典与 ledger_stats / 编排层字段对齐。"""
 
-    def __init__(self, journal_path: Path) -> None:
-        self._path = journal_path.resolve()
+    def __init__(self) -> None:
         eng = get_sqlalchemy_engine()
         if eng is None:
-            raise RuntimeError("PostgresJournalRepository 需要有效 database.postgres.dsn 且 backend 非 jsonl")
+            raise RuntimeError("PostgresJournalRepository 需要有效 database.postgres.dsn（见 config/analysis_defaults.yaml）")
         self._engine: Engine = eng
 
     def list_entries(self) -> list[dict[str, Any]]:

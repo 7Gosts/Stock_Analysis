@@ -23,21 +23,16 @@ sys.path.insert(0, str(_REPO_ROOT))
 from loguru import logger
 from sqlalchemy import text
 
-from app.account_service import mark_to_market
-from app.db import get_sqlalchemy_engine
-from config.runtime_config import get_database_backend
+from persistence.account_service import mark_to_market
+from persistence.db import get_sqlalchemy_engine
 from analysis.price_feeds import fetch_ohlcv
 
 
 def _get_latest_prices_for_positions() -> dict[str, float]:
     """Fetch latest price for each open position symbol."""
-    backend = get_database_backend()
-    if backend not in {"postgres", "dualwrite"}:
-        logger.warning("[MTM] No DB backend configured; skipping mark_to_market")
-        return {}
-
     engine = get_sqlalchemy_engine()
     if engine is None:
+        logger.warning("[MTM] No PostgreSQL engine; skipping mark_to_market")
         return {}
 
     symbol_price_map = {}

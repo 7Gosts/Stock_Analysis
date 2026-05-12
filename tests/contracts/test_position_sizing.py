@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from unittest.mock import patch
 
 from analysis.position_sizing import calculate_qty_for_idea, map_market_to_currency
 
 
-def test_calculate_qty_with_config_balance():
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_calculate_qty_with_config_balance(_mock_engine):
     idea = {
         "market": "US",
         "entry_price": 100.0,
@@ -17,7 +20,8 @@ def test_calculate_qty_with_config_balance():
     assert "qty_step" in detail or "qty" in detail
 
 
-def test_qty_too_small_returns_zero():
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_qty_too_small_returns_zero(_mock_engine):
     idea = {
         "market": "US",
         "entry_price": 1000000.0,
@@ -37,7 +41,8 @@ def test_map_market_to_currency() -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_qty_formula_crypto_usd(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_qty_formula_crypto_usd(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {
         "USD": {"balance": 100000.0, "max_loss_pct": 0.02, "qty_step": 1.0},
     }
@@ -50,7 +55,8 @@ def test_qty_formula_crypto_usd(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_qty_uses_entry_zone_mid(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_qty_uses_entry_zone_mid(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {
         "CNY": {"balance": 500000.0, "max_loss_pct": 0.02, "qty_step": 0.01},
     }
@@ -63,7 +69,8 @@ def test_qty_uses_entry_zone_mid(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_fallback_empty_accounts(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_fallback_empty_accounts(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {}
     idea = {"market": "US", "entry_price": 100.0, "stop_loss": 90.0}
     qty, d = calculate_qty_for_idea(idea)
@@ -73,7 +80,8 @@ def test_fallback_empty_accounts(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_fallback_missing_stop(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_fallback_missing_stop(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {"USD": {"balance": 100000.0, "max_loss_pct": 0.02, "qty_step": 1.0}}
     qty, d = calculate_qty_for_idea({"market": "US", "entry_price": 100.0})
     assert qty == 1.0
@@ -82,7 +90,8 @@ def test_fallback_missing_stop(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_fallback_zero_risk(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_fallback_zero_risk(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {"USD": {"balance": 100000.0, "max_loss_pct": 0.02, "qty_step": 1.0}}
     qty, d = calculate_qty_for_idea({"market": "US", "entry_price": 100.0, "stop_loss": 100.0})
     assert qty == 1.0
@@ -90,7 +99,8 @@ def test_fallback_zero_risk(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_below_min_step_returns_zero(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_below_min_step_returns_zero(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {
         "USD": {"balance": 100.0, "max_loss_pct": 0.01, "qty_step": 1.0},
     }
@@ -101,9 +111,28 @@ def test_below_min_step_returns_zero(mock_acc) -> None:
 
 
 @patch("analysis.position_sizing.get_accounts_config")
-def test_crypto_maps_usd_balance(mock_acc) -> None:
+@patch("analysis.position_sizing.get_sqlalchemy_engine", return_value=None)
+def test_crypto_maps_usd_balance(_mock_engine, mock_acc) -> None:
     mock_acc.return_value = {"USD": {"balance": 10000.0, "max_loss_pct": 0.02, "qty_step": 1.0}}
     idea = {"market": "CRYPTO", "entry_price": 50.0, "stop_loss": 40.0}
     qty, d = calculate_qty_for_idea(idea)
     assert qty == 20.0
     assert d.get("currency") == "USD"
+
+
+@patch("persistence.account_service.get_or_init_account")
+@patch("analysis.position_sizing.get_sqlalchemy_engine")
+def test_calculate_qty_ledger_not_initialized(mock_engine: Any, mock_snap: Any) -> None:
+    mock_engine.return_value = object()
+    mock_snap.return_value = {
+        "account_id": "USD",
+        "balance": 0.0,
+        "available": 0.0,
+        "used_margin": 0.0,
+        "ledger_missing": True,
+    }
+    idea = {"market": "US", "entry_price": 100.0, "stop_loss": 95.0}
+    qty, d = calculate_qty_for_idea(idea)
+    assert qty == 1.0
+    assert d.get("reason") == "ledger_not_initialized"
+    assert "journal_004" in (d.get("hint") or "")

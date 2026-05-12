@@ -5,11 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from analysis.trade_journal import save_journal
-
 
 def test_stable_order_fill_ids_fit_varchar64() -> None:
-    from app.paper_trade_service import stable_fill_id, stable_order_id
+    from persistence.paper_trade_service import stable_fill_id, stable_order_id
 
     long_id = "x" * 200
     oid = stable_order_id(long_id)
@@ -19,16 +17,16 @@ def test_stable_order_fill_ids_fit_varchar64() -> None:
     assert oid == stable_order_id(long_id)
 
 
-def test_fetch_paper_monitor_none_when_jsonl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("config.runtime_config.get_database_backend", lambda: "jsonl")
-    from app.paper_trade_service import fetch_paper_trade_monitor
+def test_fetch_paper_monitor_none_when_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("persistence.paper_trade_service.get_sqlalchemy_engine", lambda: None)
+    from persistence.paper_trade_service import fetch_paper_trade_monitor
 
     assert fetch_paper_trade_monitor() is None
 
 
 def test_build_stats_payload_paper_monitor_merged(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "app.paper_trade_service.fetch_paper_trade_monitor",
+        "persistence.paper_trade_service.fetch_paper_trade_monitor",
         lambda: {
             "paper_order_count": 2,
             "paper_fill_count": 3,
@@ -69,7 +67,6 @@ def test_render_markdown_includes_paper_section() -> None:
 
 
 def test_journal_service_calls_paper_on_filled_and_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("config.runtime_config.get_database_backend", lambda: "jsonl")
     calls: list[tuple[str, str]] = []
 
     def fake_entry(idea: dict, **kwargs: object) -> None:
@@ -78,10 +75,24 @@ def test_journal_service_calls_paper_on_filled_and_closed(monkeypatch: pytest.Mo
     def fake_exit(idea: dict, *, close_reason: str, **kwargs: object) -> None:
         calls.append((close_reason, str(idea.get("idea_id") or "")))
 
-    monkeypatch.setattr("app.paper_trade_service.create_entry_order_and_fill", fake_entry)
-    monkeypatch.setattr("app.paper_trade_service.create_exit_fill", fake_exit)
-    monkeypatch.setattr("analysis.ledger_stats.write_latest_stats", lambda *_a, **_k: tmp_path / "s.md")
+    monkeypatch.setattr("persistence.paper_trade_service.create_entry_order_and_fill", fake_entry)
+    monkeypatch.setattr("persistence.paper_trade_service.create_exit_fill", fake_exit)
+    monkeypatch.setattr("app.journal_service.write_latest_stats", lambda *_a, **_k: tmp_path / "s.md")
     monkeypatch.setattr("analysis.journal_policy.idea_passes_journal_append_gates", lambda *_a, **_k: (True, None))
+
+    store: dict[str, list] = {"entries": []}
+
+    class _MemRepo:
+        def list_entries(self) -> list:
+            return store["entries"]
+
+        def save_entries(self, entries: list) -> None:
+            store["entries"] = entries
+
+        def append_event(self, *_a: object, **_k: object) -> None:
+            pass
+
+    monkeypatch.setattr("app.journal_service.get_journal_repository", lambda _p: _MemRepo())
 
     now = datetime.now(timezone.utc)
     filled_idea = {
@@ -102,7 +113,7 @@ def test_journal_service_calls_paper_on_filled_and_closed(monkeypatch: pytest.Mo
         "fill_price": 101.0,
         "filled_at_utc": now.isoformat(),
     }
-    save_journal(tmp_path / "trade_journal.jsonl", [filled_idea])
+    store["entries"] = [filled_idea]
 
     def to_closed_tp(e: dict, rows: list, nu: datetime) -> bool:
         if str(e.get("status")) != "filled":
@@ -142,7 +153,7 @@ def test_journal_service_calls_paper_on_filled_and_closed(monkeypatch: pytest.Mo
         "created_at_utc": now.isoformat(),
         "valid_until_utc": now.isoformat(),
     }
-    save_journal(tmp_path / "trade_journal.jsonl", [pending_idea])
+    store["entries"] = [pending_idea]
 
     def to_filled(e: dict, rows: list, nu: datetime) -> bool:
         if str(e.get("status")) != "pending":
