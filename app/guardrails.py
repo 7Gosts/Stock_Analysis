@@ -14,6 +14,35 @@ FORBIDDEN_CLAIMS = (
     "交易所逐笔资金流",
 )
 
+LIGHTWEIGHT_TASK_TYPES = frozenset({"quote", "compare", "research"})
+
+
+def validate_facts_bundle(facts_bundle: dict[str, Any], *, check_paths: bool = False) -> list[str]:
+    """按 task_type 分支：轻量任务不强制 analysis_result 全模板结构。"""
+    errors: list[str] = []
+    if not isinstance(facts_bundle, dict):
+        return ["facts_bundle 必须是对象"]
+    tt = str(facts_bundle.get("task_type") or "").strip().lower()
+    if tt in LIGHTWEIGHT_TASK_TYPES:
+        rf = facts_bundle.get("risk_flags")
+        if not isinstance(rf, list):
+            errors.append("risk_flags 必须是数组")
+        ev = facts_bundle.get("evidence_sources")
+        if ev is not None and (not isinstance(ev, list)):
+            errors.append("evidence_sources 必须是数组")
+        elif isinstance(ev, list) and not ev and tt == "quote":
+            errors.append("evidence_sources 为空（轻量任务建议至少保留 kline 证据）")
+        serialized = str(facts_bundle)
+        for kw in FORBIDDEN_CLAIMS:
+            if kw in serialized:
+                errors.append(f"出现禁止口径: {kw}")
+        return errors
+    serialized = str(facts_bundle)
+    for kw in FORBIDDEN_CLAIMS:
+        if kw in serialized:
+            errors.append(f"出现禁止口径: {kw}")
+    return errors
+
 
 def validate_agent_response(payload: dict[str, Any], *, check_paths: bool = False) -> list[str]:
     errors: list[str] = []
@@ -71,3 +100,10 @@ def ensure_agent_response(payload: dict[str, Any], *, check_paths: bool = False)
     if errors:
         raise ValueError(" ; ".join(errors))
     return payload
+
+
+def ensure_facts_bundle(facts_bundle: dict[str, Any], *, check_paths: bool = False) -> dict[str, Any]:
+    errors = validate_facts_bundle(facts_bundle, check_paths=check_paths)
+    if errors:
+        raise ValueError(" ; ".join(errors))
+    return facts_bundle

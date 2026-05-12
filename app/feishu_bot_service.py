@@ -7,9 +7,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
 from loguru import logger
 
+from app.agent_facade import handle_user_request
+from app.analysis_task_client import poll_analysis_result, submit_analysis_task
 from app.feishu_asset_catalog import (
     FeishuAssetCatalog,
     canonical_tradable_symbol,
@@ -17,9 +18,13 @@ from app.feishu_asset_catalog import (
     get_catalog_for_repo,
     normalize_provider,
 )
+from app.formatters.feishu import split_feishu_text
 from app.memory_store import JsonlMemoryStore, MemoryEvent
+from app.planner import parse_user_message, plan_user_message
 from config.runtime_config import get_analysis_config
-from tools.deepseek.client import DeepSeekError, decide_feishu_route, generate_feishu_narrative
+from tools.deepseek.client import DeepSeekError, generate_feishu_narrative
+
+route_user_message = plan_user_message
 from tools.feishu.client import FeishuError, get_tenant_access_token, send_text_message
 _SEEN_MESSAGE_IDS: dict[str, float] = {}
 _MESSAGE_DEDUP_TTL_SEC = 10 * 60
@@ -83,33 +88,7 @@ def _build_analysis_facts_for_narrative(result_payload: dict[str, Any]) -> dict[
 
 
 def _split_text_for_feishu_chunks(text: str, max_len: int = _MAX_FEISHU_MESSAGE_CHARS) -> list[str]:
-    t = (text or "").strip()
-    if not t:
-        return []
-    if len(t) <= max_len:
-        return [t]
-    parts: list[str] = []
-    buf: list[str] = []
-    acc = 0
-    for block in t.split("\n\n"):
-        extra = len(block) + (2 if buf else 0)
-        if acc + extra <= max_len:
-            buf.append(block)
-            acc += extra
-            continue
-        if buf:
-            parts.append("\n\n".join(buf))
-        buf = []
-        acc = 0
-        if len(block) <= max_len:
-            buf.append(block)
-            acc = len(block)
-        else:
-            for i in range(0, len(block), max_len):
-                parts.append(block[i : i + max_len])
-    if buf:
-        parts.append("\n\n".join(buf))
-    return parts if parts else [t[:max_len]]
+    return split_feishu_text(text, max_len=max_len)
 
 
 def feishu_reply_chunks(
@@ -131,34 +110,6 @@ def feishu_reply_chunks(
             logger.warning("[FeishuBot] narrative_reply_failed err={}", exc)
     flat = format_fixed_template_reply(result_payload, user_question=user_question)
     return _split_text_for_feishu_chunks(flat)
-
-
-def parse_user_message(
-    text: str,
-    *,
-    default_symbol: str,
-    default_interval: str,
-    provider: str | None = None,
-    with_research: bool = False,
-    research_keyword: str | None = None,
-) -> dict[str, Any]:
-    """仅提供会话默认值与原文 question；标的与周期由路由 LLM 决定，经 _land_* 校验后落地。"""
-    raw = (text or "").strip()
-    q = raw if raw else "请按固定模板输出当前行情，并结合我的问题意图解释。"
-    cat = get_catalog_for_repo(_feishu_repo_root())
-    sym_u = str(default_symbol or "").strip().upper()
-    pv = provider if provider else normalize_provider(None, symbol_upper=sym_u, catalog=cat)
-    rk = str(research_keyword).strip() if isinstance(research_keyword, str) and str(research_keyword).strip() else None
-    return {
-        "symbol": default_symbol,
-        "provider": pv,
-        "interval": default_interval,
-        "question": q,
-        "use_rag": True,
-        "use_llm_decision": True,
-        "with_research": bool(with_research),
-        "research_keyword": rk,
-    }
 
 
 def analyze_multiple_symbols(*, api_base_url: str, payloads: list[dict[str, Any]]) -> str:
@@ -458,43 +409,6 @@ def format_fixed_template_reply(result_payload: dict[str, Any], *, user_question
     return "\n".join(parts).rstrip() + "\n"
 
 
-def submit_analysis_task(*, api_base_url: str, payload: dict[str, Any], timeout_sec: float = 20.0) -> str:
-    url = f"{api_base_url.rstrip('/')}/agent/analyze"
-    resp = requests.post(url, json=payload, timeout=timeout_sec)
-    resp.raise_for_status()
-    obj = resp.json()
-    task_id = str(obj.get("task_id") or "").strip()
-    if not task_id:
-        raise RuntimeError(f"提交分析任务失败: {obj}")
-    return task_id
-
-
-def poll_analysis_result(
-    *,
-    api_base_url: str,
-    task_id: str,
-    timeout_sec: float = 120.0,
-    poll_interval_sec: float = 2.0,
-) -> dict[str, Any]:
-    url = f"{api_base_url.rstrip('/')}/agent/tasks/{task_id}"
-    start = time.time()
-    while True:
-        resp = requests.get(url, timeout=20.0)
-        resp.raise_for_status()
-        obj = resp.json()
-        status = str(obj.get("status") or "")
-        if status == "completed":
-            result = obj.get("result")
-            if not isinstance(result, dict):
-                raise RuntimeError(f"任务完成但 result 非对象: {obj}")
-            return result
-        if status == "failed":
-            raise RuntimeError(f"分析任务失败: {obj.get('error')}")
-        if time.time() - start > timeout_sec:
-            raise TimeoutError(f"轮询分析任务超时: {task_id}")
-        time.sleep(max(0.5, poll_interval_sec))
-
-
 def extract_event_text(data: Any) -> str:
     content = (
         getattr(getattr(getattr(data, "event", None), "message", None), "content", "")
@@ -627,154 +541,103 @@ def build_event_handler(
             recent_messages.append({"role": "assistant", "text": f"[长期记忆] {note}"})
         append_conversation_message(sender_open_id, role="user", text=text, memory_store=memory_store)
 
-        route = route_user_message(
-            text,
-            default_symbol=default_symbol,
-            default_interval=default_interval,
-            context=ctx,
-            recent_messages=recent_messages,
+        out = handle_user_request(
+            text=text,
+            channel="feishu",
+            user_id=sender_open_id,
+            context={
+                "api_base_url": api_base_url,
+                "default_symbol": default_symbol,
+                "default_interval": default_interval,
+                "conversation_context": ctx,
+                "recent_messages": recent_messages,
+                "user_message_for_chunks": text,
+            },
         )
-        _log_event("route", open_id=sender_open_id, action=str(route.get("action") or "unknown"))
+        meta = out.get("meta") if isinstance(out.get("meta"), dict) else {}
+        route = meta.get("route") if isinstance(meta.get("route"), dict) else {}
+        _log_event(
+            "route",
+            open_id=sender_open_id,
+            action=str(route.get("action") or out.get("legacy_action") or "unknown"),
+            task_type=str(out.get("task_type") or ""),
+        )
         update_conversation_state(sender_open_id, route=route, raw_text=text)
-        if route.get("action") == "clarify":
-            reply = str(route.get("clarify_message") or "").strip()
-            if reply:
-                try:
-                    token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                    send_text_message(
-                        tenant_access_token=token,
-                        receive_id=sender_open_id,
-                        text=reply,
-                        receive_id_type="open_id",
-                    )
-                except FeishuError:
-                    pass
-                append_conversation_message(
-                    sender_open_id,
-                    role="assistant",
-                    text=reply,
-                    action="clarify",
-                    memory_store=memory_store,
+
+        reply_chunks = out.get("reply_chunks") if isinstance(out.get("reply_chunks"), list) else []
+        reply = str(out.get("final_text") or "").strip() or "\n\n".join(str(x) for x in reply_chunks if str(x).strip())
+
+        try:
+            token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
+            for ch in reply_chunks:
+                if not str(ch).strip():
+                    continue
+                send_text_message(
+                    tenant_access_token=token,
+                    receive_id=sender_open_id,
+                    text=str(ch),
+                    receive_id_type="open_id",
                 )
-            _log_event("reply", open_id=sender_open_id, action="clarify", text=reply)
-            return
-        if route.get("action") == "chat":
-            reply = str(route.get("chat_reply") or "").strip()
-            if reply:
-                try:
-                    token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                    send_text_message(
-                        tenant_access_token=token,
-                        receive_id=sender_open_id,
-                        text=reply,
-                        receive_id_type="open_id",
-                    )
-                except FeishuError:
-                    pass
-                append_conversation_message(
-                    sender_open_id,
-                    role="assistant",
-                    text=reply,
-                    action="chat",
-                    memory_store=memory_store,
-                )
-            _log_event("reply", open_id=sender_open_id, action="chat", text=reply)
-            return
-        if route.get("action") == "analyze_multi":
-            payloads = route.get("payloads")
-            if not isinstance(payloads, list):
-                payloads = []
-            reply = analyze_multiple_symbols(api_base_url=api_base_url, payloads=payloads)
+        except FeishuError:
+            pass
+
+        action_route = str(route.get("action") or "").strip().lower()
+        action_mem = "analyze"
+        if action_route == "clarify":
+            action_mem = "clarify"
+        elif action_route == "chat":
+            action_mem = "chat"
+
+        payload = route.get("payload") if isinstance(route.get("payload"), dict) else {}
+        sym_join = str(payload.get("symbol") or "").strip().upper()
+        interval_mem = str(payload.get("interval") or default_interval).strip().lower()
+        prov = str(payload.get("provider") or "").strip() or None
+        if action_route == "analyze_multi":
+            payloads = route.get("payloads") if isinstance(route.get("payloads"), list) else []
             sym_join = ",".join(
-                str(p.get("symbol") or "").strip().upper() for p in payloads if isinstance(p, dict) and str(p.get("symbol") or "").strip()
+                str(p.get("symbol") or "").strip().upper()
+                for p in payloads
+                if isinstance(p, dict) and str(p.get("symbol") or "").strip()
             )
-            interval_multi = default_interval
             first: dict[str, Any] = {}
             for p in payloads:
-                if not isinstance(p, dict):
-                    continue
-                if not first:
+                if isinstance(p, dict) and not first:
                     first = p
-                iv = str(p.get("interval") or "").strip().lower()
-                if iv:
-                    interval_multi = iv
-            try:
-                token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-                for ch in _split_text_for_feishu_chunks(reply):
-                    send_text_message(
-                        tenant_access_token=token,
-                        receive_id=sender_open_id,
-                        text=ch,
-                        receive_id_type="open_id",
-                    )
-            except FeishuError:
-                pass
-            _log_event("reply", open_id=sender_open_id, action="analyze_multi", text=reply)
+                    break
+            if first:
+                interval_mem = str(first.get("interval") or interval_mem).strip().lower()
+                prov = str(first.get("provider") or "").strip() or prov
+        _log_event("reply", open_id=sender_open_id, action=str(out.get("legacy_action") or action_route), text=reply)
+        if reply:
             append_conversation_message(
                 sender_open_id,
                 role="assistant",
                 text=reply,
-                action="analyze",
-                symbol=sym_join,
-                interval=interval_multi,
+                action=action_mem,
+                symbol=sym_join or None,
+                interval=interval_mem,
                 question=str(text or ""),
-                provider=str(first.get("provider") or "") or None,
+                provider=prov,
                 memory_store=memory_store,
             )
+        if action_route == "analyze_multi":
+            first_pl: dict[str, Any] = {}
+            pls = route.get("payloads") if isinstance(route.get("payloads"), list) else []
+            if pls and isinstance(pls[0], dict):
+                first_pl = pls[0]
             update_conversation_state(
                 sender_open_id,
                 route={
                     "action": "analyze",
                     "payload": {
-                        "symbol": str(first.get("symbol") or ""),
-                        "interval": interval_multi,
+                        "symbol": str(first_pl.get("symbol") or ""),
+                        "interval": str(first_pl.get("interval") or interval_mem),
                         "question": text,
-                        "provider": str(first.get("provider") or ""),
+                        "provider": str(first_pl.get("provider") or ""),
                     },
                 },
                 raw_text=text,
             )
-            return
-
-        payload = route.get("payload")
-        if not isinstance(payload, dict):
-            payload = parse_user_message(
-                text,
-                default_symbol=default_symbol,
-                default_interval=default_interval,
-            )
-        try:
-            task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
-            _log_event("analyze_submit", open_id=sender_open_id, task_id=task_id, symbol=str(payload.get("symbol") or ""), interval=str(payload.get("interval") or ""))
-            result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
-            reply_chunks = feishu_reply_chunks(result, user_question=text)
-        except Exception as exc:
-            reply_chunks = [f"分析失败：{exc}"]
-        reply = "\n\n".join(reply_chunks)
-        try:
-            token = get_tenant_access_token(app_id=app_id, app_secret=app_secret)
-            for ch in reply_chunks:
-                send_text_message(
-                    tenant_access_token=token,
-                    receive_id=sender_open_id,
-                    text=ch,
-                    receive_id_type="open_id",
-                )
-        except FeishuError:
-            # 回消息失败时不再抛出，避免影响 ws 主循环
-            pass
-        _log_event("reply", open_id=sender_open_id, action="analyze", text=reply)
-        append_conversation_message(
-            sender_open_id,
-            role="assistant",
-            text=reply,
-            action="analyze",
-            symbol=str(payload.get("symbol") or ""),
-            interval=str(payload.get("interval") or ""),
-            question=str(payload.get("question") or ""),
-            provider=str(payload.get("provider") or "") or None,
-            memory_store=memory_store,
-        )
 
     def _on_message(data: Any) -> None:
         # 只处理用户发送的 text 消息，避免非文本事件/自身消息导致循环触发
@@ -918,114 +781,6 @@ def _to_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     if v > maximum:
         return maximum
     return v
-
-
-def route_user_message(
-    text: str,
-    *,
-    default_symbol: str,
-    default_interval: str,
-    context: dict[str, Any] | None = None,
-    recent_messages: list[dict[str, str]] | None = None,
-) -> dict[str, Any]:
-    """意图由路由 LLM（decide_feishu_route：仅 DeepSeek tools/function calling）决定；代码只做标的表、周期合法值与 payload 落地。"""
-    raw = (text or "").strip()
-    ctx = context if isinstance(context, dict) else {}
-    catalog = _feishu_asset_catalog()
-    allowed = catalog.allowed_symbols
-
-    ds = str(default_symbol or "").strip().upper()
-    default_canon = canonical_tradable_symbol(ds, catalog)
-    if default_canon is None and allowed:
-        default_canon = sorted(allowed)[0]
-    if default_canon is None:
-        default_canon = "BTC_USDT"
-
-    ctx_sym = str(ctx.get("last_symbol") or "").strip()
-    base_symbol = canonical_tradable_symbol(ctx_sym, catalog) or default_canon
-    lp = str(ctx.get("last_provider") or "").strip().lower()
-    base_provider = lp if lp in {"tickflow", "gateio", "goldapi"} else None
-    base_interval = _normalize_interval(str(ctx.get("last_interval") or default_interval), default_interval)
-
-    if not raw:
-        return {"action": "clarify", "clarify_message": ""}
-
-    payload = parse_user_message(
-        raw,
-        default_symbol=base_symbol,
-        default_interval=base_interval,
-        provider=base_provider,
-    )
-
-    try:
-        routed = decide_feishu_route(
-            text=raw,
-            default_symbol=base_symbol,
-            default_interval=base_interval,
-            recent_messages=recent_messages,
-            tradable_assets=catalog.tradable_assets_for_prompt(),
-        )
-    except Exception as exc:
-        _log_router_llm_failure(exc)
-        return {"action": "clarify", "clarify_message": ""}
-
-    _log_routed_llm_preview(routed)
-
-    action = str(routed.get("action") or "").strip().lower()
-    if action == "clarify":
-        clarify_msg = str(routed.get("clarify_message") or "").strip()
-        return {"action": "clarify", "clarify_message": clarify_msg}
-    if action == "chat":
-        chat_reply = str(routed.get("chat_reply") or "").strip()
-        if chat_reply:
-            return {"action": "chat", "chat_reply": chat_reply}
-        return {"action": "chat"}
-
-    if action not in {"analyze"}:
-        return {"action": "clarify", "clarify_message": ""}
-
-    routed_symbols = canonical_tradable_symbol_list(routed.get("symbols"), catalog)
-    routed_interval = str(routed.get("interval") or "").strip().lower()
-    routed_question = str(routed.get("question") or "").strip()
-    with_research = _to_bool(routed.get("with_research"), default=False)
-    global_kw = str(routed.get("research_keyword") or "").strip() or None
-
-    if len(routed_symbols) > 1:
-        payloads: list[dict[str, Any]] = []
-        for sym in routed_symbols:
-            rk = (global_kw or catalog.research_keyword_for(sym) or None) if with_research else None
-            payloads.append(
-                {
-                    "symbol": sym,
-                    "provider": normalize_provider(routed.get("provider"), symbol_upper=sym, catalog=catalog),
-                    "interval": _normalize_interval(routed_interval, payload["interval"]),
-                    "question": routed_question or payload["question"],
-                    "use_rag": True,
-                    "use_llm_decision": True,
-                    "with_research": with_research,
-                    "research_keyword": rk,
-                }
-            )
-        return {"action": "analyze_multi", "payloads": payloads}
-
-    single = canonical_tradable_symbol(str(routed.get("symbol") or ""), catalog)
-    if single is None and len(routed_symbols) == 1:
-        single = routed_symbols[0]
-    if single is None:
-        return {"action": "clarify", "clarify_message": ""}
-
-    payload["symbol"] = single
-    payload["interval"] = _normalize_interval(routed_interval or str(payload.get("interval") or ""), payload["interval"])
-    q = str(routed.get("question") or "").strip()
-    if q:
-        payload["question"] = q
-    payload["provider"] = normalize_provider(routed.get("provider"), symbol_upper=single, catalog=catalog)
-    payload["with_research"] = with_research
-    if with_research:
-        payload["research_keyword"] = global_kw or catalog.research_keyword_for(single) or None
-    else:
-        payload["research_keyword"] = None
-    return {"action": "analyze", "payload": payload}
 
 
 def get_conversation_state(sender_open_id: str, *, memory_store: JsonlMemoryStore | None = None) -> dict[str, Any]:

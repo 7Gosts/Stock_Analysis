@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.feishu_bot_service import poll_analysis_result, submit_analysis_task
+from app.analysis_task_client import poll_analysis_result, submit_analysis_task
 
 
 class _Resp:
@@ -20,9 +20,9 @@ class _Resp:
 class TestFeishuApiBridge(unittest.TestCase):
     def test_submit_and_poll(self) -> None:
         with (
-            patch("app.feishu_bot_service.requests.post", return_value=_Resp({"task_id": "t1", "status": "queued"})),
+            patch("app.analysis_task_client.requests.post", return_value=_Resp({"task_id": "t1", "status": "queued"})),
             patch(
-                "app.feishu_bot_service.requests.get",
+                "app.analysis_task_client.requests.get",
                 side_effect=[
                     _Resp({"status": "running"}),
                     _Resp(

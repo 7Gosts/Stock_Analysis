@@ -7,3 +7,7 @@ langchain-openai>=0.2.0
 requests>=2.31.0
 lark-oapi>=1.4.10
 loguru>=0.7.0
+SQLAlchemy>=2.0
+psycopg[binary]>=3.2
+alembic>=1.13
+pytest>=8.0

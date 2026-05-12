@@ -76,7 +76,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_omitted_symbol_clarifies_not_default_btc(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "analyze", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -90,7 +90,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_invalid_symbol_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "FOO_USDT", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -104,7 +104,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_user_message_clarify_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "clarify", "clarify_message": "请补充标的和周期"},
         ):
             routed = route_user_message(
@@ -119,7 +119,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_route_user_message_analyze_by_router(self) -> None:
         with (
             patch(
-                "app.feishu_bot_service.decide_feishu_route",
+                "app.planner.decide_feishu_route",
                 return_value={
                     "action": "analyze",
                     "symbol": "ETH_USDT",
@@ -142,7 +142,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_bare_eth_lands_to_eth_usdt(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "ETH", "interval": "4h", "question": "短线"},
         ):
             routed = route_user_message(
@@ -156,7 +156,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_unknown_action_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "noop", "symbol": "BTC_USDT"},
         ):
             routed = route_user_message(
@@ -169,7 +169,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_user_message_chat_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "chat", "chat_reply": "你好呀，我在呢"},
         ):
             routed = route_user_message(
@@ -183,7 +183,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_user_message_multi_symbols_by_router(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -206,7 +206,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_nvda_tickflow_with_research(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "NVDA",
@@ -232,7 +232,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_route_multi_mixed_providers(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["NVDA", "BTC_USDT", "AU9999"],
@@ -285,7 +285,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_followup_uses_context(self) -> None:
         ctx = {"last_symbol": "ETH_USDT", "last_interval": "1h", "last_question": "看下ETH走势"}
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "ETH_USDT",
@@ -333,7 +333,7 @@ class TestFeishuMessageParser(unittest.TestCase):
     def test_router_receives_recent_messages(self) -> None:
         recent = [{"role": "user", "text": "看下BTC 4h"}]
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "chat", "chat_reply": "收到"},
         ) as mocked:
             route_user_message(
@@ -367,7 +367,7 @@ class TestFeishuMessageParser(unittest.TestCase):
             self.assertEqual(st.get("last_interval"), "4h")
 
     def test_strict_mode_router_error_goes_clarify(self) -> None:
-        with patch("app.feishu_bot_service.decide_feishu_route", side_effect=RuntimeError("x")):
+        with patch("app.planner.decide_feishu_route", side_effect=RuntimeError("x")):
             routed = route_user_message(
                 "看下走势",
                 default_symbol="BTC_USDT",
@@ -379,7 +379,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_analyze_missing_symbol_clarifies(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={"action": "analyze", "symbol": "", "interval": "4h", "question": ""},
         ):
             routed = route_user_message(
@@ -403,7 +403,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_natural_language_all_request_goes_multi(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -424,7 +424,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_natural_language_crypto_generic_goes_multi(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbols": ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -442,7 +442,7 @@ class TestFeishuMessageParser(unittest.TestCase):
 
     def test_first_choice_after_clarify(self) -> None:
         with patch(
-            "app.feishu_bot_service.decide_feishu_route",
+            "app.planner.decide_feishu_route",
             return_value={
                 "action": "analyze",
                 "symbol": "BTC_USDT",

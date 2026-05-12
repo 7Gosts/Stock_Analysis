@@ -53,6 +53,29 @@ class TestTradeJournalStateMachine(unittest.TestCase):
         self.assertEqual(idea.get("status"), "closed")
         self.assertEqual(idea.get("exit_status"), "sl")
 
+    def test_filled_marks_to_market_with_last_close_not_last_high(self) -> None:
+        now = datetime.now(timezone.utc)
+        idea = {
+            "status": "filled",
+            "direction": "long",
+            "entry_zone": [99.0, 101.0],
+            "entry_price": 100.0,
+            "fill_price": 100.0,
+            "filled_at_utc": (now - timedelta(hours=2)).isoformat(),
+            "stop_loss": 95.0,
+            "take_profit_levels": [120.0],
+            "created_at_utc": (now - timedelta(hours=3)).isoformat(),
+            "valid_until_utc": (now + timedelta(hours=6)).isoformat(),
+        }
+        rows = [
+            _bar(now - timedelta(hours=1), 99.5, 110.0, 101.0),
+        ]
+        changed = update_idea_with_rows(idea, rows, now)
+        self.assertTrue(changed)
+        self.assertEqual(idea.get("status"), "filled")
+        self.assertEqual(idea.get("exit_status"), "float_profit")
+        self.assertEqual(idea.get("unrealized_pnl_pct"), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

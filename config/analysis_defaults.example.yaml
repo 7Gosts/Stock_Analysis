@@ -78,3 +78,26 @@ feishu:
   narrative_system_prompt: ""
   # 用户说「短线」且未写具体周期时，路由 LLM 使用的默认 interval（合法值之一）
   short_term_interval: "4h"
+
+agent:
+  enable_grounded_writer: true
+  writer_model: ""
+  writer_temperature: 0.3
+  writer_system_prompt: ""
+  enable_quote_mode: true
+  enable_compare_mode: true
+  enable_research_mode: true
+  fallback_to_template_reply: true
+
+# 台账存储：默认 jsonl；迁移期 dualwrite（JSONL 主路径，PG 观测）
+database:
+  backend: "jsonl"
+  postgres:
+    dsn: "postgresql+psycopg://stock_user:stock_pass@127.0.0.1:5432/stock_analysis"
+    pool_size: 5
+    max_overflow: 10
+    pool_pre_ping: true
+    pool_recycle: 1800
+    echo: false
+  dualwrite:
+    rollback_jsonl_on_pg_failure: false

@@ -483,3 +483,83 @@ def generate_feishu_narrative(
     if not text:
         raise DeepSeekError("DeepSeek 叙事返回空正文")
     return text
+
+
+GROUNDED_WRITER_SYSTEM_BY_MODE: dict[str, str] = {
+    "quick": (
+        "你是金融简报撰稿人。用户 JSON 内含 task_type、response_mode 与 facts_bundle。\n"
+        "要求：\n"
+        "1) 只引用 facts_bundle 中出现的数值与中文描述；禁止编造价格、成交或资金流。\n"
+        "2) 回答要短（现价类几句话即可），禁止输出代码字段名或英文键名（如 triggered、preferred_side、entry=None、aligned）。\n"
+        "3) 禁止口径：已成交、成交回报、主力资金净流入、交易所逐笔资金流。\n"
+        "4) 文末一句：仅供技术分析与程序化演示，不构成投资建议。\n"
+        "输出纯中文正文，无 Markdown 代码围栏。"
+    ),
+    "compare": (
+        "你是多资产对比撰稿人。依据 facts_bundle 中的多标的事实（含 compare_facts.rows）做排序或强弱判断说明。\n"
+        "只使用已给出的价格、趋势、共振等字段；禁止编造；禁止输出编程字段名；禁止具体下单指令。\n"
+        "文末免责声明：仅供技术分析与程序化演示，不构成投资建议。\n"
+        "输出纯中文正文。"
+    ),
+    "analysis": (
+        "你是行情分析撰稿人。facts_bundle.market_facts.analysis_facts 为程序算好的技术快照（含 fixed_template、均线、威科夫摘要）。\n"
+        "自然分段，避免「━━」「【结论】」式刻板排版；不得编造未出现的数据；禁止将编程字段名原样输出给用户。\n"
+        "文末免责声明：仅供技术分析与程序化演示，不构成投资建议。\n"
+        "输出纯中文正文。"
+    ),
+    "narrative": (
+        "你是研报线索撰稿人。facts_bundle.research_facts 为检索摘要，不得写成「已验证价格触发」或交易指令。\n"
+        "不写具体 entry/stop/tp；不编造机构已确认成交；可列观点分歧与需二次验证之处。\n"
+        "文末免责声明：仅供技术分析与程序化演示，不构成投资建议。\n"
+        "输出纯中文正文。"
+    ),
+}
+
+
+def generate_grounded_answer(
+    *,
+    facts_bundle: dict[str, Any],
+    user_question: str | None,
+    task_type: str,
+    response_mode: str,
+    timeout_sec: float = 60.0,
+) -> dict[str, Any]:
+    """基于 facts_bundle 的 grounded 撰稿；返回 text/sections/style。"""
+    cfg = get_analysis_config()
+    agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
+    temperature = float(agent.get("writer_temperature", fei.get("narrative_temperature", 0.35)))
+    custom = str(agent.get("writer_system_prompt") or "").strip()
+    mode_key = str(response_mode or "analysis").strip().lower()
+    if mode_key not in GROUNDED_WRITER_SYSTEM_BY_MODE:
+        mode_key = "analysis"
+    system_prompt = custom if custom else GROUNDED_WRITER_SYSTEM_BY_MODE[mode_key]
+    model = str(agent.get("writer_model") or "").strip() or _model_name()
+    user_obj: dict[str, Any] = {
+        "task_type": task_type,
+        "response_mode": response_mode,
+        "facts_bundle": facts_bundle,
+    }
+    if user_question and str(user_question).strip():
+        user_obj["user_question"] = str(user_question).strip()
+    url = f"{_base_url()}/chat/completions"
+    payload: dict[str, Any] = {
+        "model": model,
+        "thinking": {"type": "disabled"},
+        "temperature": temperature,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_obj, ensure_ascii=False)},
+        ],
+    }
+    res = _post_json(url, payload, timeout_sec=timeout_sec)
+    try:
+        content = res["choices"][0]["message"]["content"]
+    except Exception as exc:
+        raise DeepSeekError(f"DeepSeek grounded 响应结构异常: {res}") from exc
+    if not isinstance(content, str):
+        raise DeepSeekError(f"DeepSeek grounded content 非字符串: {content!r}")
+    text = content.strip()
+    if not text:
+        raise DeepSeekError("DeepSeek grounded 返回空正文")
+    return {"text": text, "sections": [{"title": "正文", "content": text}], "style": response_mode}

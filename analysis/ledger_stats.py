@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from analysis.beijing_time import format_beijing
+from app.journal_repository_factory import load_journal_entries_for_stats
 from config.runtime_config import get_journal_action_thresholds
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,23 +32,6 @@ def parse_iso_utc(ts: str | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def load_journal(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        try:
-            obj = json.loads(s)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
 
 
 def safe_pct(num: int, den: int) -> float | None:
@@ -369,7 +351,7 @@ def latest_entries_by_idea(entries: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def build_stats_payload(entries: list[dict[str, Any]], now_utc: datetime | None = None) -> dict[str, Any]:
     now = now_utc or datetime.now(timezone.utc)
-    return {
+    payload: dict[str, Any] = {
         "generated_at_utc": now.isoformat(),
         "week_7d": period_stats(entries, now_utc=now, days=7),
         "month_30d": period_stats(entries, now_utc=now, days=30),
@@ -378,6 +360,15 @@ def build_stats_payload(entries: list[dict[str, Any]], now_utc: datetime | None 
         "breakdown_7d": period_breakdown(entries, now_utc=now, days=7),
         "breakdown_30d": period_breakdown(entries, now_utc=now, days=30),
     }
+    try:
+        from app.paper_trade_service import fetch_paper_trade_monitor
+
+        pm = fetch_paper_trade_monitor()
+        if pm is not None:
+            payload["paper_trade_monitor"] = pm
+    except Exception:
+        pass
+    return payload
 
 
 def _md_count_table(title: str, data: dict[str, int]) -> str:
@@ -461,64 +452,21 @@ def render_markdown(now_utc: datetime, payload: dict[str, Any]) -> str:
                 f"| {row['market']} | {row['candidate_total']} | {fmt_pct(row['hit_rate_pct'])} | "
                 f"{fmt_pct(row['tp_rate_pct'])} | {fmt_pct(row['sl_rate_pct'])} |\n"
             )
-    return "".join(lines)
-
-
-def render_readable_journal_csv(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
-    out = io.StringIO(newline="")
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(["更新时间", fmt_local_second(now_utc)])
-    writer.writerow(
-        [
-            "创建时间",
-            "市场",
-            "标的",
-            "方向",
-            "开单",
-            "入场点位",
-            "止损",
-            "止盈1/2",
-            "RR",
-            "建议动作",
-            "时间止损截止",
-            "状态",
-            "出场",
-            "已实现盈亏",
-            "浮动盈亏",
-        ]
-    )
-    for e in latest_entries_by_idea(entries):
-        tps = e.get("take_profit_levels")
-        tp_text = "—"
-        if isinstance(tps, list) and tps:
-            tp1 = fmt_px(tps[0])
-            tp2 = fmt_px(tps[1]) if len(tps) > 1 else "—"
-            tp_text = f"{tp1} / {tp2}"
-        ex = str(e.get("exit_status") or "—").upper()
-        ddl = fmt_iso_local_full(e.get("time_stop_deadline_utc"))
-        rr = _calc_rr(e)
-        act = _action_hint_cn(e)
-        order_text = f"{str(e.get('entry_type') or '—')}/{_order_kind_cn(e)}"
-        writer.writerow(
-            [
-                fmt_iso_local_full(e.get("created_at_utc")),
-                e.get("market", "UNK"),
-                e.get("symbol", "UNKNOWN"),
-                e.get("direction", "—"),
-                order_text,
-                fmt_px(e.get("fill_price") if e.get("filled_at_utc") else e.get("entry_price")),
-                fmt_px(e.get("stop_loss")),
-                tp_text,
-                fmt_num(rr),
-                act,
-                ddl,
-                e.get("status", "—"),
-                ex,
-                fmt_pct(e.get("realized_pnl_pct")),
-                fmt_pct(e.get("unrealized_pnl_pct")),
-            ]
+    pm = payload.get("paper_trade_monitor")
+    if isinstance(pm, dict):
+        lines.append("\n## 模拟成交对账（PostgreSQL）\n\n")
+        lines.append(
+            f"- `paper_orders` 条数：**{pm.get('paper_order_count', 0)}**；"
+            f"`paper_fills` 条数：**{pm.get('paper_fill_count', 0)}**\n"
         )
-    return out.getvalue()
+        lines.append(
+            f"- `filled` 但无入场 fill（fill_seq=1）：**{pm.get('filled_idea_without_entry_fill_count', 0)}**\n"
+        )
+        lines.append(
+            f"- `closed`(tp/sl) 但无出场 fill（fill_seq=2）：**{pm.get('closed_idea_without_exit_fill_count', 0)}**\n\n"
+        )
+        lines.append("说明：仅 `database.backend` 为 `postgres` 或 `dualwrite` 且能连库时统计；纯 `jsonl` 模式无此项。\n")
+    return "".join(lines)
 
 
 def render_readable_journal_md(now_utc: datetime, entries: list[dict[str, Any]]) -> str:
@@ -553,26 +501,26 @@ def render_readable_journal_md(now_utc: datetime, entries: list[dict[str, Any]])
     return "".join(lines)
 
 
-def write_latest_stats(journal_path: Path) -> tuple[Path, Path]:
-    entries = load_journal(journal_path)
+def write_latest_stats(journal_path: Path) -> Path:
+    entries = load_journal_entries_for_stats(journal_path)
     now_utc = datetime.now(timezone.utc)
     payload = build_stats_payload(entries, now_utc=now_utc)
     payload["journal"] = str(journal_path.resolve())
     md_text = render_markdown(now_utc, payload)
     readable_md = render_readable_journal_md(now_utc, entries)
-    readable_csv = render_readable_journal_csv(now_utc, entries)
     out_dir = journal_path.parent
     md_path = out_dir / "trade_journal_stats_latest.md"
     readable_md_path = out_dir / "trade_journal_readable.md"
-    readable_csv_path = out_dir / "trade_journal_readable.csv"
     # 仅保留 Markdown 统计文件；若历史 JSON 存在则清理掉。
     json_path = out_dir / "trade_journal_stats_latest.json"
     if json_path.exists():
         json_path.unlink()
+    csv_legacy = out_dir / "trade_journal_readable.csv"
+    if csv_legacy.exists():
+        csv_legacy.unlink()
     md_path.write_text(md_text, encoding="utf-8")
     readable_md_path.write_text(readable_md, encoding="utf-8")
-    readable_csv_path.write_text(readable_csv, encoding="utf-8-sig")
-    return md_path, readable_csv_path
+    return md_path
 
 
 def main() -> int:
@@ -586,7 +534,7 @@ def main() -> int:
     args = p.parse_args()
 
     journal_path = Path(args.journal).resolve()
-    entries = load_journal(journal_path)
+    entries = load_journal_entries_for_stats(journal_path)
     now_utc = datetime.now(timezone.utc)
     payload = build_stats_payload(entries, now_utc=now_utc)
     payload["journal"] = str(journal_path)

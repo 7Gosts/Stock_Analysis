@@ -113,3 +113,19 @@ def run_offline_eval(*, runner: TaskRunner, cases: list[EvalCase]) -> dict[str, 
         },
         "cases": rows,
     }
+
+
+FORBIDDEN_REPLY_SNIPPETS = ("triggered=None", "preferred_side=无", "entry=None", "aligned=False")
+
+
+def forbidden_internal_field_leak_rate(text: str) -> float:
+    """越高表示越可能向用户泄漏工程调试片段（启发式）。"""
+    t = text or ""
+    if not t.strip():
+        return 0.0
+    hits = sum(1 for s in FORBIDDEN_REPLY_SNIPPETS if s in t)
+    return round(hits / max(1, len(FORBIDDEN_REPLY_SNIPPETS)), 4)
+
+
+def task_match_rate(*, expected: str, actual: str) -> float:
+    return 1.0 if str(expected).strip().lower() == str(actual).strip().lower() else 0.0

@@ -77,3 +77,35 @@ def get_journal_action_thresholds() -> tuple[float, float]:
         worth_v = observe_v
     return worth_v, observe_v
 
+
+def get_database_config() -> dict[str, Any]:
+    cfg = get_analysis_config()
+    node = cfg.get("database")
+    return node if isinstance(node, dict) else {}
+
+
+def get_database_backend() -> str:
+    """jsonl | postgres | dualwrite；缺省为 jsonl。"""
+    db = get_database_config()
+    raw = str(db.get("backend") or "jsonl").strip().lower()
+    if raw in {"jsonl", "postgres", "dualwrite"}:
+        return raw
+    return "jsonl"
+
+
+def get_postgres_dsn() -> str:
+    db = get_database_config()
+    pg = db.get("postgres") if isinstance(db.get("postgres"), dict) else {}
+    return str(pg.get("dsn") or "").strip()
+
+
+def get_dualwrite_rollback_jsonl_on_pg_failure() -> bool:
+    """默认 false：PG 写失败不回滚已成功写入的 JSONL。"""
+    db = get_database_config()
+    dw = db.get("dualwrite") if isinstance(db.get("dualwrite"), dict) else {}
+    v = dw.get("rollback_jsonl_on_pg_failure")
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return s in {"1", "true", "yes", "on"}
+

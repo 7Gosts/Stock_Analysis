@@ -467,7 +467,7 @@ def execute(args: Namespace, *, emit_logs: bool = True) -> dict[str, Any]:
             _log(f"[台账] 更新 {journal_updated} 条，新增 {journal_created} 条 -> {journal_path}")
             if stats_md is not None:
                 _log(f"[台账统计] {stats_md}")
-                _log(f"[台账可读版] {journal_path.parent / 'trade_journal_readable.csv'}")
+                _log(f"[台账可读版] {journal_path.parent / 'trade_journal_readable.md'}")
         journal_meta = {
             "created": journal_created,
             "updated": journal_updated,

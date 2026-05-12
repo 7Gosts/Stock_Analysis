@@ -27,7 +27,7 @@
 | `price_feeds.py` | 统一入口 `fetch_ohlcv(provider, …)`：仅做 symbol/interval 适配、provider 分发与 OHLCV 归一化 |
 | `kline_metrics.py` | 股票/通用分析主干：SMA/Fib/趋势、威科夫背景、123 结构、`structure_filters_v1`、`time_stop_v1`、`mtf_v1`（辅周期可选）、`compute_ohlc_stats`、`format_*` 报告片段 |
 | `crypto_kline_analysis.py` | CryptoTradeDesk 风格增强层：复用 `kline_metrics` 并叠加 MA 8/21/55 与 regime 字段（读 `config/analysis_defaults.yaml`） |
-| `ledger_stats.py` | 读 `trade_journal.jsonl`，生成周/月统计、`breakdown_*d`（按 status / wyckoff_bias、时间止损过期挂单数）、可读 Markdown |
+| `ledger_stats.py` | 读台账（经 `load_journal_entries_for_stats`），生成周/月统计、`breakdown_*d`（按 status / wyckoff_bias、时间止损过期挂单数）、可读 Markdown `trade_journal_readable.md` |
 | `gold_api.py` | 贵金属辅助：品种映射、日线聚合等（不承载 provider 级 HTTP 请求实现） |
 | `trade_journal.py` | 台账状态机：`watch/pending -> filled/expired`、`filled -> closed(tp/sl)/float_*`，以及去重辅助 |
 | `journal_policy.py` | 台账写入策略：`min_journal_rr`、可选 `journal_quality`、加密 `swing` 候选构造（与 CryptoTradeDesk 思路对齐） |
@@ -57,6 +57,7 @@
 | `orchestrator.py` | 主流程编排：选标的、拉主/辅周期、调分析引擎、组装 overview 与候选台账 |
 | `report_writer.py` | 报告与总览写入：同日 prepend、`ai_overview` 槽位合并、历史时间戳文件清理 |
 | `journal_service.py` | 台账服务：先更新旧条目再追加新候选（含 RR/质量门控）并刷新统计文件 |
+| `paper_trade_service.py` | 模拟委托/成交：仅 `postgres`/`dualwrite` 写 `paper_orders`/`paper_fills`；由 `journal_service` 在 filled/平仓事件后调用 |
 
 ---
 
@@ -90,7 +91,7 @@
 | `output/<provider>/<market>/<本地日期>/` | `ai_brief.md`、`ai_overview.json`、`full_report.md`（K 线会话） |
 | `output/research/<provider>/<market>/<本地日期>/` | `stock_analysis.py --with-research` 研报落盘：`*_research.json` / `*_research.md` |
 | `output/research/<本地日期>/` | **仅** `cli/yb_search.py` 默认输出（无 provider/market 分桶） |
-| `output/trade_journal*.jsonl/md/json` | 台账与统计快照 |
+| `output/trade_journal*.jsonl/md` | 台账与统计快照（含 `trade_journal_stats_latest.md`、`trade_journal_readable.md`） |
 
 ---
 

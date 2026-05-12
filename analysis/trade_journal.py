@@ -166,7 +166,7 @@ def _transition_filled_to_closed_or_float(
             return True
 
     if str(idea.get("status") or "") == "filled":
-        last_close = parsed_rows[-1][2]
+        last_close = parsed_rows[-1][3]
         pnl = (last_close - fill_price) / max(fill_price, 1e-12) * 100.0
         if direction == "short":
             pnl = -pnl
