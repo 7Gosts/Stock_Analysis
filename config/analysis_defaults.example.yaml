@@ -89,6 +89,18 @@ agent:
   enable_research_mode: true
   fallback_to_template_reply: true
 
+# 纸交易头寸：按 market 映射币种账本；qty = (balance * max_loss_pct) / |entry - stop|
+# CN/A 股与贵金属(PM)走 CNY；美股与加密货币(CRYPTO)走 USD；HK 默认 USD；未知 market 默认 USD。
+accounts:
+  CNY:
+    balance: 500000
+    max_loss_pct: 0.02
+    qty_step: 0.0001
+  USD:
+    balance: 100000
+    max_loss_pct: 0.02
+    qty_step: 0.0001
+
 # 台账存储：默认 jsonl；迁移期 dualwrite（JSONL 主路径，PG 观测）
 database:
   backend: "jsonl"

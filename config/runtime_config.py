@@ -109,3 +109,44 @@ def get_dualwrite_rollback_jsonl_on_pg_failure() -> bool:
     s = str(v or "").strip().lower()
     return s in {"1", "true", "yes", "on"}
 
+
+def get_accounts_config() -> dict[str, dict[str, Any]]:
+    """多币种账户：键为大写币种代码（CNY/USD），值为 balance / max_loss_pct / qty_step 等。"""
+    cfg = get_analysis_config()
+    node = cfg.get("accounts")
+    if not isinstance(node, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in node.items():
+        ck = str(k).strip().upper()
+        if isinstance(v, dict) and ck:
+            out[ck] = dict(v)
+    return out
+
+
+def get_account_system_config() -> dict[str, Any]:
+    cfg = get_analysis_config()
+    node = cfg.get("account_system")
+    return node if isinstance(node, dict) else {}
+
+
+def get_account_initial_balance(currency: str) -> float:
+    ac = get_accounts_config()
+    c = str(currency).strip().upper()
+    if c in ac:
+        val = ac[c].get("initial_balance") or ac[c].get("balance")
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def reload_accounts_config() -> None:
+    """Force reload of YAML config (accounts and other parameters).
+
+    Call this after editing `config/analysis_defaults.yaml` during runtime.
+    """
+    global _CFG_CACHE
+    _CFG_CACHE = _load_yaml(_resolve_cfg_path())
+

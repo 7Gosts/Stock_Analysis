@@ -76,6 +76,19 @@ def _jb(obj: Any) -> str:
     return json.dumps(obj if obj is not None else {}, ensure_ascii=False)
 
 
+def _fetch_requested_qty_from_order(conn: Any, order_id: str) -> float:
+    row = conn.execute(
+        text("SELECT requested_qty FROM paper_orders WHERE order_id = :oid LIMIT 1"),
+        {"oid": order_id},
+    ).first()
+    if row is None or row[0] is None:
+        return 1.0
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | None = None) -> None:
     """watch/pending -> filled：插入 1 条 paper_orders + 1 条 entry fill（fill_seq=1）。幂等。"""
     eng = _engine()
@@ -88,7 +101,6 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
     if has_entry_fill_for_idea(idea_id):
         return
 
-    order_id = stable_order_id(idea_id)
     fill_id = stable_fill_id(idea_id, 1)
     symbol = str(idea.get("symbol") or "")
     market = str(idea.get("market") or "UNK")
@@ -110,6 +122,33 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
     fill_time = _parse_fill_time(str(idea.get("filled_at_utc") or ""), fallback=now)
     simulation_rule = {"engine": "paper_bar_touch", "note": "phase1_single_fill"}
 
+    qty_raw_val = idea.get("calculated_qty")
+    if qty_raw_val is None:
+        qty = 1.0
+    else:
+        try:
+            qty = float(qty_raw_val)
+        except (TypeError, ValueError):
+            qty = 1.0
+    if qty <= 0:
+        logger.warning(
+            "[PaperTrade] skip entry fill: qty<=0 idea_id={} detail={}",
+            idea_id,
+            idea.get("_position_sizing_detail"),
+        )
+        return
+
+    order_id = stable_order_id(idea_id)
+    px_for_notional = float(limit_px) if limit_px is not None else float(fill_px)
+    requested_notional = qty * px_for_notional
+    fill_notional = qty * float(fill_px)
+
+    sizing_detail = (
+        idea.get("_position_sizing_detail") if isinstance(idea.get("_position_sizing_detail"), dict) else {}
+    )
+    meta_order = {"phase": 1, "position_sizing_detail": sizing_detail}
+    meta_fill = {"role": "entry", "position_sizing_detail": sizing_detail}
+
     ins_order = text(
         """
         INSERT INTO paper_orders (
@@ -123,7 +162,7 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
         ) VALUES (
           :order_id, :idea_id, :symbol, :market, :provider, :interval,
           :side, 'limit', NULL,
-          1.0, NULL,
+          :requested_qty, :requested_notional,
           :limit_price, NULL, :stop_price,
           'filled', 'entry_simulated',
           CAST(:created_at AS timestamptz), CAST(:updated_at AS timestamptz), CAST(:submitted_at AS timestamptz),
@@ -140,7 +179,7 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
           fill_time, fill_seq, fill_source, meta
         ) VALUES (
           :fill_id, :order_id, :idea_id, :symbol, :side,
-          1.0, :fill_price, NULL, NULL, NULL, NULL,
+          :fill_qty, :fill_price, :fill_notional, NULL, NULL, NULL,
           CAST(:fill_time AS timestamptz), 1, 'paper_bar_touch', CAST(:meta AS jsonb)
         )
         ON CONFLICT (idea_id, fill_seq) DO NOTHING
@@ -154,13 +193,15 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
         "provider": provider[:32],
         "interval": interval[:16],
         "side": side[:16],
+        "requested_qty": qty,
+        "requested_notional": requested_notional,
         "limit_price": float(limit_px) if limit_px is not None else None,
         "stop_price": float(stop_px) if isinstance(stop_px, (int, float)) else None,
         "created_at": fill_time.isoformat(),
         "updated_at": now.isoformat(),
         "submitted_at": fill_time.isoformat(),
         "simulation_rule": _jb(simulation_rule),
-        "meta": _jb({"phase": 1}),
+        "meta": _jb(meta_order),
     }
     params_fill = {
         "fill_id": fill_id,
@@ -168,9 +209,11 @@ def create_entry_order_and_fill(idea: dict[str, Any], *, now_utc: datetime | Non
         "idea_id": idea_id,
         "symbol": symbol[:32],
         "side": side[:16],
+        "fill_qty": qty,
         "fill_price": float(fill_px),
+        "fill_notional": fill_notional,
         "fill_time": fill_time.isoformat(),
-        "meta": _jb({"role": "entry"}),
+        "meta": _jb(meta_fill),
     }
     try:
         with eng.begin() as conn:
@@ -211,7 +254,7 @@ def create_exit_fill(idea: dict[str, Any], *, close_reason: str, now_utc: dateti
         logger.warning("[PaperTrade] skip exit fill: no closed_price idea_id={}", idea_id)
         return
     fill_time = _parse_fill_time(str(idea.get("closed_at_utc") or ""), fallback=now)
-    meta = {"role": "exit", "close_reason": close_reason}
+    meta_base = {"role": "exit", "close_reason": close_reason}
 
     ins_fill = text(
         """
@@ -221,24 +264,30 @@ def create_exit_fill(idea: dict[str, Any], *, close_reason: str, now_utc: dateti
           fill_time, fill_seq, fill_source, meta
         ) VALUES (
           :fill_id, :order_id, :idea_id, :symbol, :side,
-          1.0, :fill_price, NULL, NULL, NULL, NULL,
+          :fill_qty, :fill_price, :fill_notional, NULL, NULL, NULL,
           CAST(:fill_time AS timestamptz), 2, 'paper_bar_touch', CAST(:meta AS jsonb)
         )
         ON CONFLICT (idea_id, fill_seq) DO NOTHING
         """
     )
-    params_fill = {
-        "fill_id": fill_id,
-        "order_id": order_id,
-        "idea_id": idea_id,
-        "symbol": symbol[:32],
-        "side": side[:16],
-        "fill_price": float(fill_px),
-        "fill_time": fill_time.isoformat(),
-        "meta": _jb(meta),
-    }
     try:
         with eng.begin() as conn:
+            qty = _fetch_requested_qty_from_order(conn, order_id)
+            fill_notional = qty * float(fill_px)
+            meta = dict(meta_base)
+            meta["matched_entry_qty"] = qty
+            params_fill = {
+                "fill_id": fill_id,
+                "order_id": order_id,
+                "idea_id": idea_id,
+                "symbol": symbol[:32],
+                "side": side[:16],
+                "fill_qty": qty,
+                "fill_price": float(fill_px),
+                "fill_notional": fill_notional,
+                "fill_time": fill_time.isoformat(),
+                "meta": _jb(meta),
+            }
             conn.execute(ins_fill, params_fill)
     except Exception as exc:
         logger.error(

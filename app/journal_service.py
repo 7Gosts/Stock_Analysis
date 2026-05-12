@@ -4,8 +4,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from analysis import journal_policy
 from analysis.ledger_stats import write_latest_stats
+from analysis.position_sizing import calculate_qty_for_idea, map_market_to_currency
+from app import account_service
+from config.runtime_config import get_account_system_config
 from analysis.trade_journal import has_active_idea, update_idea_with_rows
 
 from app import paper_trade_service
@@ -107,10 +112,86 @@ def process_journal(
             if not idea:
                 continue
             if evt == "filled":
-                paper_trade_service.create_entry_order_and_fill(idea, now_utc=now_utc)
+                # Determine whether account system is enabled and provide dynamic available balance
+                acct_cfg = get_account_system_config()
+                currency = map_market_to_currency(idea.get("market"))
+                if acct_cfg.get("enabled"):
+                    available = account_service.get_available_balance(currency)
+                    ledger = {"available": available}
+                    qty, sizing_detail = calculate_qty_for_idea(idea, account_ledger=ledger)
+                else:
+                    qty, sizing_detail = calculate_qty_for_idea(idea)
+                idea["calculated_qty"] = qty
+                idea["_position_sizing_detail"] = sizing_detail
+                logger.info(
+                    "[PositionSizing] symbol={} market={} currency={} entry_ref={} stop={} "
+                    "max_loss_amount={} qty={} fallback={} skip_reason={}",
+                    idea.get("symbol"),
+                    idea.get("market"),
+                    sizing_detail.get("currency"),
+                    sizing_detail.get("entry_ref"),
+                    sizing_detail.get("stop_ref"),
+                    sizing_detail.get("max_loss_amount"),
+                    qty,
+                    sizing_detail.get("fallback"),
+                    sizing_detail.get("skip_reason"),
+                )
+                # skip if sizing indicates too small
+                if qty <= 0:
+                    logger.warning("[PositionSizing] skip entry: qty={} idea_id={}", qty, idea.get("idea_id"))
+                else:
+                    paper_trade_service.create_entry_order_and_fill(idea, now_utc=now_utc)
+                    # if backend enabled, persist position into account ledger
+                    if acct_cfg.get("enabled"):
+                        try:
+                            order_id = paper_trade_service.stable_order_id(str(idea.get("idea_id") or ""))
+                            fill_price = idea.get("fill_price") or idea.get("entry_price")
+                            account_service.open_position(currency=currency, idea=idea, fill_qty=qty, fill_price=float(fill_price), order_id=order_id, now_utc=now_utc)
+                        except Exception:
+                            logger.exception("[JournalService] account_service.open_position failed for idea_id={}", idea.get("idea_id"))
             elif evt == "closed_tp":
                 paper_trade_service.create_exit_fill(idea, close_reason="tp", now_utc=now_utc)
+                acct_cfg = get_account_system_config()
+                if acct_cfg.get("enabled"):
+                    try:
+                        currency = map_market_to_currency(idea.get("market"))
+                        fill_qty = idea.get("fill_qty") or idea.get("calculated_qty", 1.0)
+                        entry_price = idea.get("fill_price") or idea.get("entry_price")
+                        exit_price = idea.get("closed_price")
+                        if entry_price and exit_price:
+                            realized_pnl, realized_pnl_pct = account_service.close_position(
+                                idea_id=str(idea.get("idea_id") or ""),
+                                fill_qty=float(fill_qty),
+                                entry_price=float(entry_price),
+                                exit_price=float(exit_price),
+                                close_reason="tp",
+                                now_utc=now_utc
+                            )
+                            if acct_cfg.get("auto_sync_to_journal_ideas"):
+                                idea["realized_pnl_pct"] = realized_pnl_pct
+                    except Exception:
+                        logger.exception("[JournalService] account_service.close_position failed for idea_id={}", idea.get("idea_id"))
             elif evt == "closed_sl":
                 paper_trade_service.create_exit_fill(idea, close_reason="sl", now_utc=now_utc)
+                acct_cfg = get_account_system_config()
+                if acct_cfg.get("enabled"):
+                    try:
+                        currency = map_market_to_currency(idea.get("market"))
+                        fill_qty = idea.get("fill_qty") or idea.get("calculated_qty", 1.0)
+                        entry_price = idea.get("fill_price") or idea.get("entry_price")
+                        exit_price = idea.get("closed_price")
+                        if entry_price and exit_price:
+                            realized_pnl, realized_pnl_pct = account_service.close_position(
+                                idea_id=str(idea.get("idea_id") or ""),
+                                fill_qty=float(fill_qty),
+                                entry_price=float(entry_price),
+                                exit_price=float(exit_price),
+                                close_reason="sl",
+                                now_utc=now_utc
+                            )
+                            if acct_cfg.get("auto_sync_to_journal_ideas"):
+                                idea["realized_pnl_pct"] = realized_pnl_pct
+                    except Exception:
+                        logger.exception("[JournalService] account_service.close_position failed for idea_id={}", idea.get("idea_id"))
         stats_md_path = write_latest_stats(journal_path)
     return journal_updated, journal_created, journal_path, stats_md_path, journal_new_entries
