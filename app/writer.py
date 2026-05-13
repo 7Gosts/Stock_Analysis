@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from config.runtime_config import get_analysis_config
-from tools.deepseek.client import DeepSeekError, generate_feishu_narrative, generate_grounded_answer
+from tools.llm.client import LLMClientError, generate_feishu_narrative, generate_grounded_answer
 
 
 def grounded_writer_enabled() -> bool:
@@ -77,7 +77,7 @@ def write_grounded_reply(
     response_mode: str,
     channel: str = "feishu",
 ) -> dict[str, Any]:
-    """Grounded writer：只引用 facts_bundle；失败抛 DeepSeekError 由上层降级。"""
+    """Grounded writer：只引用 facts_bundle；失败抛 LLMClientError 由上层降级。"""
     _ = channel
     return generate_grounded_answer(
         facts_bundle=facts_bundle,
@@ -112,5 +112,5 @@ def safe_grounded_write(
             task_type=task_type,
             response_mode=response_mode,
         )
-    except (DeepSeekError, Exception):
+    except (LLMClientError, Exception):
         return None

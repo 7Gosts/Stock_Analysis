@@ -7,7 +7,7 @@ from typing import Annotated, Any, TypedDict
 
 from app.agent_tools import make_tools
 from app.guardrails import ensure_agent_response
-from config.runtime_config import get_analysis_config
+from config.runtime_config import get_llm_runtime_settings
 from analysis.beijing_time import default_review_time_for_interval, now_beijing_str, review_time_has_explicit_clock
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -212,9 +212,19 @@ def _tool_trace(messages: list[BaseMessage]) -> list[str]:
 
 
 def _build_llm() -> ChatOpenAI:
-    model = _deepseek_model()
-    api_key = _deepseek_api_key()
-    base_url = _deepseek_base_url()
+    settings = get_llm_runtime_settings()
+    model = str(settings.get("model") or "").strip()
+    api_key = str(settings.get("api_key") or "").strip()
+    base_url = str(settings.get("base_url") or "").strip()
+    provider = str(settings.get("provider") or "deepseek").strip()
+    if not bool(settings.get("openai_compatible", True)):
+        raise RuntimeError(f"当前 LLM provider={provider} 未声明为 OpenAI-compatible，暂不支持通过 ChatOpenAI 接入。")
+    if not api_key:
+        raise RuntimeError("缺少 LLM API Key（可通过 LLM_API_KEY、<PROVIDER>_API_KEY 或 YAML llm.providers.<provider>.api_key 配置）。")
+    if not model:
+        raise RuntimeError("缺少 LLM model（可通过 LLM_MODEL、<PROVIDER>_MODEL 或 YAML llm.providers.<provider>.model 配置）。")
+    if not base_url:
+        raise RuntimeError("缺少 LLM base_url（可通过 LLM_BASE_URL、<PROVIDER>_BASE_URL 或 YAML llm.providers.<provider>.base_url 配置）。")
     return ChatOpenAI(
         model=model,
         temperature=0.2,
@@ -222,33 +232,3 @@ def _build_llm() -> ChatOpenAI:
         base_url=base_url,
         extra_body={"thinking": {"type": "disabled"}},
     )
-
-
-def _deepseek_api_key() -> str:
-    key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    if key:
-        return key
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    key = str(node.get("api_key") or "").strip()
-    if not key:
-        raise RuntimeError("缺少 DeepSeek API Key（环境变量或 config/analysis_defaults.yaml）")
-    return key
-
-
-def _deepseek_base_url() -> str:
-    v = os.getenv("DEEPSEEK_BASE_URL", "").strip()
-    if v:
-        return v
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    return str(node.get("base_url") or "https://api.deepseek.com").strip()
-
-
-def _deepseek_model() -> str:
-    v = os.getenv("DEEPSEEK_MODEL", "").strip()
-    if v:
-        return v
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    return str(node.get("model") or "deepseek-v4-flash").strip()

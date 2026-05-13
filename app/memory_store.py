@@ -1,3 +1,14 @@
+"""飞书历史存储层（三层重构版）。
+
+职责收敛为：
+1. 飞书会话历史存储（conversation_memory）
+2. 上下文辅助恢复（仅用于指代消解和风格延续）
+
+关键改变：
+- 与 session_state.py 完全分离
+- 只存储飞书消息文本，不存储结构化状态
+- 不作为事实源本体（文档要求：历史消息只用于消歧与语言承接）
+"""
 from __future__ import annotations
 
 import json
@@ -15,14 +26,13 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 @dataclass
 class MemoryEvent:
+    """飞书历史事件（只存储消息文本，不存储结构化事实）。"""
     open_id: str
-    role: str
+    role: str  # user / assistant
     text: str
-    action: str | None = None
-    symbol: str | None = None
+    action: str | None = None  # clarify / chat / analyze / followup
+    symbol: str | None = None  # 仅用于辅助标注，不作为事实源
     interval: str | None = None
-    question: str | None = None
-    provider: str | None = None
     created_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -32,17 +42,29 @@ class MemoryEvent:
             "role": self.role,
             "text": self.text,
             "action": self.action,
-            "symbol": self.symbol,
-            "interval": self.interval,
-            "question": self.question,
             "created_ts": ts,
         }
-        if self.provider:
-            d["provider"] = self.provider
+        if self.symbol:
+            d["symbol"] = self.symbol
+        if self.interval:
+            d["interval"] = self.interval
         return d
 
 
 class JsonlMemoryStore:
+    """飞书历史存储（JSONL 后端）。
+
+    只用于：
+    1. 指代消解（"这个"、"它"等）
+    2. 多轮追问承接
+    3. 用户语言风格延续
+    4. 当本地事实未命中时提供弱补充
+
+    禁止用于：
+    1. entry / stop / tp1 / tp2 / triggered 等状态判断
+    2. "已入场 / 待触发 / 已止盈 / 已止损"等状态推断
+    """
+
     def __init__(
         self,
         *,
@@ -59,6 +81,7 @@ class JsonlMemoryStore:
             self.path.write_text("", encoding="utf-8")
 
     def append_event(self, event: MemoryEvent) -> None:
+        """追加一条历史事件。"""
         row = event.to_dict()
         if not row["open_id"] or not row["role"] or not row["text"]:
             return
@@ -68,15 +91,17 @@ class JsonlMemoryStore:
                 f.write(line + "\n")
 
     def load_recent(self, *, open_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        """加载最近 N 条历史（用于指代消解）。"""
         key = str(open_id or "").strip()
         if not key or limit <= 0:
             return []
         rows = self._read_all()
         out = [r for r in rows if str(r.get("open_id") or "").strip() == key]
         out.sort(key=lambda x: float(x.get("created_ts") or 0.0))
-        return out[-int(limit) :]
+        return out[-int(limit):]
 
     def load_last_profile(self, *, open_id: str) -> dict[str, str]:
+        """加载最近一次分析任务的辅助标注（仅用于默认值推断，不作为事实源）。"""
         key = str(open_id or "").strip()
         if not key:
             return {}
@@ -87,17 +112,11 @@ class JsonlMemoryStore:
                 continue
             symbol = str(r.get("symbol") or "").strip().upper()
             interval = str(r.get("interval") or "").strip().lower()
-            question = str(r.get("question") or "").strip()
             if symbol and "symbol" not in out:
                 out["symbol"] = symbol
             if interval and "interval" not in out:
                 out["interval"] = interval
-            if question and "question" not in out:
-                out["question"] = question
-            prov = str(r.get("provider") or "").strip().lower()
-            if prov in {"tickflow", "gateio", "goldapi"} and "provider" not in out:
-                out["provider"] = prov
-            if len(out) >= 4:
+            if len(out) >= 2:
                 break
         return out
 
@@ -109,6 +128,7 @@ class JsonlMemoryStore:
         top_k: int = 3,
         history_days: int | None = None,
     ) -> list[dict[str, Any]]:
+        """长期记忆检索（弱补充，不作为主事实源）。"""
         key = str(open_id or "").strip()
         q = str(query or "").strip()
         if not key or not q:
@@ -119,13 +139,15 @@ class JsonlMemoryStore:
         docs = [
             r
             for r in rows
-            if str(r.get("open_id") or "").strip() == key and float(r.get("created_ts") or 0.0) >= cutoff
+            if str(r.get("open_id") or "").strip() == key
+            and float(r.get("created_ts") or 0.0) >= cutoff
         ]
         if not docs:
             return []
         return _rank_docs(query=q, docs=docs, top_k=max(1, int(top_k)))
 
     def compact(self) -> None:
+        """压缩历史文件（删除过期记录）。"""
         rows = self._read_all()
         if not rows:
             return
@@ -140,7 +162,7 @@ class JsonlMemoryStore:
         out_rows: list[dict[str, Any]] = []
         for key, items in by_user.items():
             items.sort(key=lambda x: float(x.get("created_ts") or 0.0))
-            out_rows.extend(items[-self.max_messages_per_user :])
+            out_rows.extend(items[-self.max_messages_per_user:])
         out_rows.sort(key=lambda x: float(x.get("created_ts") or 0.0))
         with self._lock:
             with self.path.open("w", encoding="utf-8") as f:
@@ -169,6 +191,7 @@ class JsonlMemoryStore:
 
 
 def _rank_docs(*, query: str, docs: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    """基于 TF-IDF 的文档排序（弱补充）。"""
     q_tokens = _tokenize(query)
     if not q_tokens:
         return []
@@ -196,17 +219,15 @@ def _rank_docs(*, query: str, docs: list[dict[str, Any]], top_k: int) -> list[di
     out: list[dict[str, Any]] = []
     for idx, score in scored[:top_k]:
         d = docs[idx]
-        out.append(
-            {
-                "score": round(score, 6),
-                "open_id": d.get("open_id"),
-                "role": d.get("role"),
-                "text": str(d.get("text") or "")[:240],
-                "symbol": d.get("symbol"),
-                "interval": d.get("interval"),
-                "created_ts": d.get("created_ts"),
-            }
-        )
+        out.append({
+            "score": round(score, 6),
+            "open_id": d.get("open_id"),
+            "role": d.get("role"),
+            "text": str(d.get("text") or "")[:240],
+            "symbol": d.get("symbol"),
+            "interval": d.get("interval"),
+            "created_ts": d.get("created_ts"),
+        })
     return out
 
 
@@ -222,12 +243,7 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _doc_text(doc: dict[str, Any]) -> str:
-    return (
-        f"{doc.get('text') or ''} "
-        f"{doc.get('symbol') or ''} "
-        f"{doc.get('interval') or ''} "
-        f"{doc.get('question') or ''}"
-    )
+    return f"{doc.get('text') or ''} {doc.get('symbol') or ''} {doc.get('interval') or ''}"
 
 
 def _tfidf(tokens: list[str], idf: dict[str, float]) -> dict[str, float]:

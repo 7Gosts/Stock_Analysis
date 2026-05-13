@@ -47,19 +47,39 @@ pivot_mtf_match_rel: 0.004
 # 1-2-3 规则集标识
 method_123_ruleset_id: ross_123_reversal_fractal_v1
 
-# DeepSeek（模板）
-# api_key: 替换为你自己的 API Key
-deepseek:
-  api_key: "替换为你自己的api key"
-  base_url: "https://api.deepseek.com"
-  model: "deepseek-v4-flash"
+# 通用 LLM 提供商配置（统一 agent 主模型入口）
+# 说明：
+# 1) 默认仍使用 DeepSeek
+# 2) 后续可将 default_provider 切到 openai / openrouter / 其他 OpenAI-compatible 平台
+# 3) 当前统一 LLM 入口只读取本块
+llm:
+  default_provider: "deepseek"
+  providers:
+    deepseek:
+      env_prefix: "DEEPSEEK"
+      base_url: "https://api.deepseek.com"
+      model: "deepseek-v4-flash"
+      openai_compatible: true
+      api_key: "替换为你自己的api key"
+    openai:
+      env_prefix: "OPENAI"
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-4.1-mini"
+      openai_compatible: true
+      api_key: "替换为你自己的api key"
+    openrouter:
+      env_prefix: "OPENROUTER"
+      base_url: "https://openrouter.ai/api/v1"
+      model: "openai/gpt-4.1-mini"
+      openai_compatible: true
+      api_key: "替换为你自己的api key"
 
 # 飞书机器人（模板）
+# 注：default_symbol / default_interval / short_term_interval 已迁移到 runtime route context，
+# 由 session_state + market_config + router_policy 常量在运行时决定，不再作为配置字段。
 feishu:
   app_id: "替换为你自己的app id"
   app_secret: "替换为你自己的app secret"
-  default_symbol: "BTC_USDT"
-  default_interval: "4h"
   memory:
     enabled: true
     backend: "jsonl" # A 阶段先用 jsonl，后续可升级 sqlite/vector
@@ -68,16 +88,14 @@ feishu:
     history_days: 30
     long_term_top_k: 3
   llm_memory_rounds: 4 # 传给路由模型的最近对话轮数（1轮=用户+机器人）
-  # 路由仅支持 DeepSeek function calling（tools）；勿要求模型输出裸 JSON。留空则用代码内默认。
+  # 路由仍走 tools/llm/client.py 的 tool-calling 客户端（provider-agnostic）；当前默认使用 llm.providers.deepseek，勿要求模型输出裸 JSON。留空则用代码内默认。
   llm_router_system_prompt: ""
   llm_router_temperature: 0.0
-  # 为 true 时，飞书回复用 DeepSeek 将分析结果 JSON 转为口语化长文；失败则回退固定模板。也可用环境变量 FEISHU_USE_NARRATIVE_REPLY=1
+  # 为 true 时，飞书回复会调用当前 grounded/narrative writer 生成口语化长文；默认模型仍来自 llm.providers.deepseek。失败则回退固定模板。也可用环境变量 FEISHU_USE_NARRATIVE_REPLY=1
   use_narrative_reply: false
   narrative_temperature: 0.35
-  # 可选：覆盖默认叙事 system 提示；留空则用 tools/deepseek 内建 DEFAULT_FEISHU_NARRATIVE_SYSTEM
+  # 可选：覆盖默认叙事 system 提示；留空则用 tools/llm/client.py 内建默认提示
   narrative_system_prompt: ""
-  # 用户说「短线」且未写具体周期时，路由 LLM 使用的默认 interval（合法值之一）
-  short_term_interval: "4h"
 
 agent:
   enable_grounded_writer: true

@@ -42,6 +42,66 @@ def get_analysis_config(*, force_reload: bool = False) -> dict[str, Any]:
     return _CFG_CACHE
 
 
+def get_llm_config() -> dict[str, Any]:
+    cfg = get_analysis_config()
+    node = cfg.get("llm")
+    return node if isinstance(node, dict) else {}
+
+
+def get_default_llm_provider(default: str = "deepseek") -> str:
+    env_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if env_provider:
+        return env_provider
+    llm_cfg = get_llm_config()
+    provider = str(llm_cfg.get("default_provider") or "").strip().lower()
+    if provider:
+        return provider
+    return default
+
+
+def get_llm_provider_config(provider: str | None = None) -> dict[str, Any]:
+    provider_name = str(provider or get_default_llm_provider()).strip().lower()
+    llm_cfg = get_llm_config()
+    providers = llm_cfg.get("providers") if isinstance(llm_cfg.get("providers"), dict) else {}
+    node = providers.get(provider_name) if isinstance(providers.get(provider_name), dict) else {}
+    out = dict(node)
+    out.setdefault("provider", provider_name)
+    out.setdefault("env_prefix", provider_name.upper())
+    out.setdefault("openai_compatible", True)
+    return out
+
+
+def get_llm_runtime_settings(provider: str | None = None) -> dict[str, Any]:
+    node = get_llm_provider_config(provider)
+    env_prefix = str(node.get("env_prefix") or node.get("provider") or "LLM").strip().upper()
+
+    provider_name = str(node.get("provider") or get_default_llm_provider()).strip().lower()
+    model = (
+        os.getenv("LLM_MODEL", "").strip()
+        or os.getenv(f"{env_prefix}_MODEL", "").strip()
+        or str(node.get("model") or "").strip()
+    )
+    base_url = (
+        os.getenv("LLM_BASE_URL", "").strip()
+        or os.getenv(f"{env_prefix}_BASE_URL", "").strip()
+        or str(node.get("base_url") or "").strip()
+    )
+    api_key = (
+        os.getenv("LLM_API_KEY", "").strip()
+        or os.getenv(f"{env_prefix}_API_KEY", "").strip()
+        or str(node.get("api_key") or "").strip()
+    )
+
+    return {
+        "provider": provider_name,
+        "env_prefix": env_prefix,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "openai_compatible": bool(node.get("openai_compatible", True)),
+    }
+
+
 def get_ma_system() -> dict[str, Any]:
     cfg = get_analysis_config()
     node = cfg.get("ma_system")

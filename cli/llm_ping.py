@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""最小化 DeepSeek 连通性检测：不启动飞书/API，只打一条 chat/completions。"""
+"""最小化 LLM 连通性检测：不启动飞书/API，只打一条 chat/completions。
+
+注：当前默认 provider 是 deepseek，但脚本命名与异常已 provider-agnostic。
+"""
 
 from __future__ import annotations
 
@@ -11,9 +14,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.deepseek.client import (  # noqa: E402
-    DeepSeekError,
-    _DEEPSEEK_JSON_OBJECT_SYSTEM_SUFFIX,
+from tools.llm.client import (  # noqa: E402
+    LLMClientError,
+    _JSON_OBJECT_SYSTEM_SUFFIX,
     _base_url,
     _model_name,
     _post_json,
@@ -21,11 +24,11 @@ from tools.deepseek.client import (  # noqa: E402
 
 
 def _mask_key_hint() -> str:
-    from tools.deepseek.client import _api_key
+    from tools.llm.client import _api_key
 
     try:
         k = _api_key()
-    except DeepSeekError:
+    except LLMClientError:
         return "(无 Key)"
     if len(k) < 12:
         return "(已配置)"
@@ -35,9 +38,9 @@ def _mask_key_hint() -> str:
 def main() -> int:
     url = f"{_base_url()}/chat/completions"
     model = _model_name()
-    print(f"[deepseek_ping] base_url={_base_url()}")
-    print(f"[deepseek_ping] model={model}")
-    print(f"[deepseek_ping] api_key={_mask_key_hint()}")
+    print(f"[llm_ping] base_url={_base_url()}")
+    print(f"[llm_ping] model={model}")
+    print(f"[llm_ping] api_key={_mask_key_hint()}")
 
     minimal = {
         "model": model,
@@ -51,7 +54,7 @@ def main() -> int:
         res = _post_json(url, minimal, timeout_sec=20.0)
         msg = res.get("choices", [{}])[0].get("message", {}).get("content", "")
         print(f"OK choices[0].content={msg!r}")
-    except DeepSeekError as e:
+    except LLMClientError as e:
         print(f"FAIL {e}")
 
     print("\n--- Test B: chat + response_format json_object (system 须含字面 json，与路由一致) ---")
@@ -63,7 +66,7 @@ def main() -> int:
         "messages": [
             {
                 "role": "system",
-                "content": "Reply with one JSON object only." + _DEEPSEEK_JSON_OBJECT_SYSTEM_SUFFIX,
+                "content": "Reply with one JSON object only." + _JSON_OBJECT_SYSTEM_SUFFIX,
             },
             {"role": "user", "content": '{"task":"ping"}'},
         ],
@@ -77,10 +80,10 @@ def main() -> int:
             print("OK content parses as JSON")
         except json.JSONDecodeError:
             print("WARN content is not valid JSON string")
-    except DeepSeekError as e:
+    except LLMClientError as e:
         print(f"FAIL {e}")
 
-    print("\n说明：若此前飞书路由报 HTTP 400 + Prompt must contain the word json，根因是 DeepSeek 要求")
+    print("\n说明：若此前飞书路由报 HTTP 400 + Prompt must contain the word json，根因是 OpenAI-compatible API 要求")
     print("      在启用 response_format=json_object 时，messages 文本里必须出现子串 json（与 HTTP 体字段无关）。")
     return 0
 

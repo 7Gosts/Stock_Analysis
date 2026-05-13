@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Stock Analysis Agent Rules
 
-- **契约入口（新窗口必读）**：仓库根目录 **`AGENTS.md`**（含三逻辑角色与调度协议 **§0.1～§0.2**）；完整条文与公式见 **`AI_股票对话提示.md`**（如 §2.1、§3.1、§6）。
+- **读取顺序**：先看 **`AGENTS.md`** 恢复上下文；需要完整条文、公式、例外时再查 **`AI_股票对话提示.md`**；本文件只保留必须常驻的硬规则。
 - 仓库内 **Python 包与文件速查**：`docs/NAMESPACE.md`（`analysis` = 业务分析/归一化/指标/台账，`tools` = 外部 API 客户端实现，`intel` = 研报客封装）。
 - 目录边界（强制）：`analysis/price_feeds.py` 仅做 provider 分发与 OHLCV 归一化；`tickflow/gateio/goldapi` 外部 API 请求位于 `tools/<provider>/client.py`；`market_data/` 仍是板块/资金流结构化数据预留域。
 
@@ -13,35 +13,16 @@ alwaysApply: true
   - **仅用研报产物（market-intel）时**：不得从研报文本推断或输出具体 **entry/stop/tp**、手数或「已可下单」类执行结论；不得冒充交易所实时成交或官方资金流。
   - **仅用或主用 K 线产物（crypto-kline / macro-kline）时**：不得把研报标题、摘要或评级表述为「已验证的价格触发」或「机构已确认」式定论；技术触发只引用 OHLCV / `ai_overview.json` / 台账结构字段。
   - **`market_data/` 未接**：不得编造官方板块成分、交易所级逐笔资金流等结构化数据；可改用研报关键词作**线索**并声明非官方成分。
-  - 叙事与技术**同一轮并存**时：须分栏标注 **叙事证据（研报检索）** 与 **技术证据（OHLCV / ai_overview）**（见 `AI_股票对话提示.md` §2.1）；二者冲突时不强行拧成单一方向，默认偏观察、降执行强度（见该节）。
+  - 叙事与技术**同一轮并存**时：须分栏标注 **叙事证据（研报检索）** 与 **技术证据（OHLCV / ai_overview）**；二者冲突时不强行拧成单一方向，默认偏观察、降执行强度。完整写法见 `AI_股票对话提示.md` §2.1。
 
 - 始终使用简体中文回复。
 - 写作风格：自然、直接、清晰；先结论后依据；避免模板化空话。
-- **首次对话 / 从其他 Agent 入口**：若用户尚未说明 **整体资产规模（可区间）** 与 **风险偏好（至少含单笔最大亏损占权益比例或保守/均衡/进取）**，应先完成简短问答，或请用户确认使用「默认演示画像」并在回复中写明假设；**之后**再跑行情 CLI。同一对话内已给出画像则可沿用。
-- 已建立风险画像且已读 `ai_overview.json` 时：逐标的须给出 **情景化仓位与开单建议**（用 JSON 中 `entry/stop/tp` 与 `triggered`，公式见 `AI_股票对话提示.md` §3.1；流程与路由见 `AGENTS.md`），并声明为自述参数下的演算，不构成投资建议。**纯叙事轮次**无技术 JSON 时不得编造 §3.1 价位。
-- 股票行情相关请求默认先执行（在**仓库根目录**；若适用上条「首次对话」，则先画像再执行）：
-  - `python cli/stock_analysis.py --market-brief --report-only --out-dir output`
-- 若用户明确要看**研报线索**、**机构观点**、**行业/板块资金与配置叙事**（不等同于交易所逐笔资金流），在行情命令基础上追加研报客搜索：
-  - 多标的默认（用标的名称做关键词）：  
-    `python cli/stock_analysis.py --market-brief --report-only --out-dir output --with-research --research-n 5`
-  - 单标的且用户给了研报关键词（含板块名/主题词）：  
-    `python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --with-research --research-n 5 --research-keyword "<关键词>"`
-  - 说明：`stock_analysis.py --with-research` 时研报写入 **`output/research/<provider>/<market>/<本地日期>/`**（与脚本中 `research_dir` 一致）；`full_report.md` / `ai_overview.json` 在同次技术会话目录。**搜索不要求 API Key**，下载才需要 `YANBAOKE_API_KEY`（见 `tools/yanbaoke/SKILL.md`）。
-  - 边界：研报客提供的是**研报检索与摘要线索**，不是保证准确的实时“主力资金净流入”数据；若用户要的是交易所级资金流或**官方板块成分**，应明确说明：资金流与板块结构化数据属 **`market_data/` 预留域**，当前未接则不做编造。
-- **板块 / 概念 / 行业名单类问题（强制研报检索）**：当用户询问「某板块或概念有哪些股 / 成分 / 龙头 / 标的」等——即使主要诉求是成分名单——在说明**官方板块成分表仍属 `market_data/` 未接、不得编造**的前提下，**仍必须主动调用研报客**查一轮叙事线索（搜索不要求 API Key）。**不要求先有风险画像**即可执行本检索。
-  - **仅关键词、不拉 K 线**（推荐）：在仓库根目录执行  
-    `python cli/yb_search.py --keyword "<用户所述板块或概念名>" --n 5`  
-    产物在 **`output/research/<本地日期>/`**（`yb_search` 默认，无 provider/market 分桶）；读取对应 `*_research.md` / `*_research.json` 后，用 2～4 条要点概括机构在说什么，并再次声明这不是官方成分股。
-  - **若同一轮还要跑 `stock_analysis.py`**：在行情命令上加 `--with-research`，并用 `--research-keyword` 与板块/主题词对齐。
-- 若用户想看**新的股票**，先更新 `config/market_config.json`：
-  - 在 `assets` 追加 `symbol` / `name` / `market` / `data_symbol`
-  - 需要默认纳入简报时，再把 `symbol` 加入 `default_symbols`
-- 读取产物顺序固定为（与 CLI 落盘一致）：
-  1) `output/<provider>/<market>/<本地日期>/ai_brief.md`
-  2) `output/<provider>/<market>/<本地日期>/ai_overview.json`
-  3) `output/<provider>/<market>/<本地日期>/full_report.md`
-- 输出顺序固定为：先逐标的解读，再跨标的总结。
-- 每个标的解读至少包含：综合倾向、关键位（含 Fib 区间）、触发条件、风险点、免责声明；**已建立风险画像时**还须包含情景化仓位与开单建议（见 `AI_股票对话提示.md` §3.1）。全文解读末尾须包含 **建议下次复核时间**（见 `AI_股票对话提示.md` §6 与 `AGENTS.md` §2 步骤 E）。
+- **首次对话 / 从其他 Agent 入口**：若用户尚未说明 **整体资产规模（可区间）** 与 **风险偏好（至少含单笔最大亏损占权益比例或保守/均衡/进取）**，应先完成简短问答，或请用户确认使用「默认演示画像」并在回复中写明假设；**之后**再跑行情 CLI。同一对话内已给出画像则可沿用。完整问法与口径见 `AI_股票对话提示.md` §0.1。
+- **执行顺序**：按 `AGENTS.md` §2 执行；即先风险画像，再路由，再跑 CLI，再按固定顺序读产物，再输出解读与复核时间。
+- **CLI 与产物路径**：默认命令、研报命令、板块检索命令、输出目录与读取顺序统一以 `AGENTS.md` §3～§4 为准；本文件不重复展开命令示例。
+- **个性化仓位与开单**：仅在已建立风险画像且已读 `ai_overview.json` 时输出；entry/stop/tp/triggered 只能来自技术 JSON，不得从研报推导。公式与写法见 `AI_股票对话提示.md` §3.1。
+- **新增标的**：先校验 API 可用性，再更新 `config/market_config.json`；字段要求与风格统一以 `AI_股票对话提示.md` §1 为准。
+- **输出底线**：先逐标的，再跨标的；每个标的至少包含综合倾向、关键位、触发条件、风险点、免责声明；全文末尾必须有复核时间。具体模板见 `AGENTS.md` §2 与 `AI_股票对话提示.md` §3、§6。
 - **台账**：**PostgreSQL** `journal_*` 存结构快照（非交易所成交）；写入前经 `config/analysis_defaults.yaml` 的 `min_journal_rr` 与可选 `journal_quality`，逻辑见 `analysis/journal_policy.py`。加密 / `gateio` 可并存 **`tactical` 与 `swing`** 两条候选（分槽去重）。RR 过滤不保证可执行。
 - 合规口径：仅作技术分析与程序化演示，不构成投资建议。
 - 数据源默认 `tickflow`；若用户指定可切换 `gateio`（加密）或 **`goldapi`**（贵金属，默认内置 appkey；`--symbol` 用配置里贵金属标的如 `AU9999`）。

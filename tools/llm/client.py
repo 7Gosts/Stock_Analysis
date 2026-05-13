@@ -6,46 +6,38 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from config.runtime_config import get_analysis_config
+from config.runtime_config import get_analysis_config, get_llm_runtime_settings
 from analysis.beijing_time import default_review_time_for_interval, now_beijing_str
 
 
-class DeepSeekError(RuntimeError):
+class LLMClientError(RuntimeError):
+    """LLM client 调用异常（provider-agnostic）。"""
     pass
 
 
-# DeepSeek：使用 response_format=json_object 时，messages 全文须出现子串 "json"（见 API 报错 invalid_request_error）
-_DEEPSEEK_JSON_OBJECT_SYSTEM_SUFFIX = "\n\n(json: Your entire reply must be one JSON object.)"
+# OpenAI-compatible API：使用 response_format=json_object 时，messages 全文须出现子串 "json"（见 API 报错 invalid_request_error）
+_JSON_OBJECT_SYSTEM_SUFFIX = "\n\n(json: Your entire reply must be one JSON object.)"
 
 
 def _base_url() -> str:
-    env_url = os.getenv("DEEPSEEK_BASE_URL", "").strip()
-    if env_url:
-        return env_url.rstrip("/")
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    url = str(node.get("base_url") or "").strip()
+    settings = get_llm_runtime_settings("deepseek")
+    url = str(settings.get("base_url") or "").strip()
     return (url or "https://api.deepseek.com").rstrip("/")
 
 
 def _model_name() -> str:
-    env_model = os.getenv("DEEPSEEK_MODEL", "").strip()
-    if env_model:
-        return env_model
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    model = str(node.get("model") or "").strip()
+    settings = get_llm_runtime_settings("deepseek")
+    model = str(settings.get("model") or "").strip()
     return model or "deepseek-v4-flash"
 
 
 def _api_key() -> str:
-    key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    settings = get_llm_runtime_settings("deepseek")
+    key = str(settings.get("api_key") or "").strip()
     if not key:
-        cfg = get_analysis_config()
-        node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-        key = str(node.get("api_key") or "").strip()
-    if not key:
-        raise DeepSeekError("缺少 DeepSeek API Key（环境变量 DEEPSEEK_API_KEY 或 config/analysis_defaults.yaml）。")
+        raise LLMClientError(
+            "缺少 LLM API Key（环境变量 LLM_API_KEY / DEEPSEEK_API_KEY，或 config/analysis_defaults.yaml 的 llm.providers.deepseek.api_key）。"
+        )
     return key
 
 
@@ -55,29 +47,44 @@ def _feishu_router_prompt_cfg() -> dict[str, Any]:
     return node if isinstance(node, dict) else {}
 
 
+# Router policy 常量（不再从 YAML 配置读取）
+ROUTER_POLICY = {
+    "allowed_intervals": ["15m", "30m", "1h", "4h", "1d"],
+    "default_interval": "4h",
+    "term_to_interval": {
+        "短线": "4h",
+        "超短": "1h",
+        "日内短线": "1h",
+    },
+}
+
+
 def _feishu_short_term_interval() -> str:
-    """飞书：用户说「短线」等且未明确周期时使用的默认 interval（配置 feishu.short_term_interval）。"""
-    allowed = {"15m", "30m", "1h", "4h", "1d"}
-    cfg = _feishu_router_prompt_cfg()
-    raw = str(cfg.get("short_term_interval") or "4h").strip().lower()
-    return raw if raw in allowed else "4h"
+    """飞书：用户说「短线」等且未明确周期时使用的默认 interval。
+
+    注：已迁移到 router policy 常量，不再从 YAML 配置读取。
+    """
+    return ROUTER_POLICY["term_to_interval"].get("短线", "4h")
 
 
 def _feishu_router_interval_instruction(*, short_iv: str) -> str:
     return (
         "\n\n周期（interval）约定：用户提到「短线、超短、日内短线」等且未明确写出具体 K 线周期（15m/30m/1h/4h/1d）时，"
-        f"interval 必须设为 {short_iv}（来自配置 feishu.short_term_interval，可在 yaml 修改）。"
+        f"interval 必须设为 {short_iv}（来自 router policy 常量 ROUTER_POLICY）。"
         "若用户已明确某一合法周期，则以用户为准。"
     )
 
 
 # 未配置 feishu.llm_router_system_prompt 时使用；以 tools 为主，无 tool_calls 时见 decide_feishu_route 对 assistant 正文的兜底。
-DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报）。
+DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报/板块/归属/概念检索）。
 优先调用提供的工具之一完成意图；不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。
 闲聊、致谢或引导用户发起行情分析时，请使用 reply_chat：message 可写多段完整中文，可简要归类列出用户 JSON 里 tradable_assets 相关标的与示例问法（不必抄全表名，分类说明即可）。
 若模型接口未返回 tool_calls、仅在 assistant 正文中输出内容，后端也会把正文交给用户；但仍应优先用 reply_chat(message=...) 一次性给出可读回复。
 用户消息 JSON 中含 tradable_assets（来自 market_config）、default_symbol、default_interval、short_term_interval_default。
 行情分析必须调用 analyze_market：symbol 或 symbols 只能从 tradable_assets 里的 symbol 选取；多标的时 symbols 至少 2 项。
+如用户问题涉及"查研报""查板块""查归属""查概念""查主题"或类似表达，优先调用 search_research 或 query_concept_board 工具（如仅有关键词可只填 keyword，若有 symbol 可一并填写）。
+如用户问题同时涉及行情分析与研报/板块/归属检索，需分别调用 analyze_market 与 search_research/query_concept_board，并分栏输出。
+不得将研报检索或板块归属混入行情分析主流程。
 口语里 eth/btc/sol 等须映射为表中存在的代码（如 *_USDT）。
 interval 仅 15m/30m/1h/4h/1d；用户说短线且未写具体周期时用 short_term_interval_default。
 provider 须与所选标的在 tradable_assets 中的 provider 一致。
@@ -118,6 +125,56 @@ def _feishu_router_tool_definitions() -> list[dict[str, Any]]:
                         "research_keyword": {
                             "type": "string",
                             "description": "研报检索关键词，可选",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_research",
+                "description": "研报/机构观点/主题/概念/板块检索，支持关键词和可选 symbol。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "检索关键词，如行业、主题、概念、板块等，可为空（如只查 symbol）",
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "description": "可选，标的代码，如 BTC_USDT、NVDA",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "可选，数据源，如 yanbaoke、tickflow、gateio、goldapi",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_concept_board",
+                "description": "查询标的所属概念/板块归属，支持 symbol 或关键词。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "可选，标的代码，如 BTC_USDT、NVDA",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "可选，概念/板块/主题关键词",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "可选，数据源，如 yanbaoke、market_data 等",
                         },
                     },
                     "required": [],
@@ -168,13 +225,13 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
 def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
     """将第一条 tool_call 转为 route_user_message 所需的 dict（含 action 等）。"""
     if not isinstance(tool_calls, list) or not tool_calls:
-        raise DeepSeekError("路由 tool_calls 为空")
+        raise LLMClientError("路由 tool_calls 为空")
     tc0 = tool_calls[0]
     if not isinstance(tc0, dict):
-        raise DeepSeekError("路由 tool_call 结构异常")
+        raise LLMClientError("路由 tool_call 结构异常")
     fn = tc0.get("function")
     if not isinstance(fn, dict):
-        raise DeepSeekError("路由 tool_call.function 缺失")
+        raise LLMClientError("路由 tool_call.function 缺失")
     name = str(fn.get("name") or "").strip()
     raw_args = str(fn.get("arguments") or "")
     args = _parse_tool_arguments(raw_args)
@@ -203,6 +260,32 @@ def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
             out["research_keyword"] = rk.strip()
         return out
 
+    if name == "search_research":
+        out: dict[str, Any] = {"action": "research"}
+        kw = args.get("keyword")
+        sym = args.get("symbol")
+        pv = args.get("provider")
+        if isinstance(kw, str) and kw.strip():
+            out["keyword"] = kw.strip()
+        if isinstance(sym, str) and sym.strip():
+            out["symbol"] = sym.strip()
+        if isinstance(pv, str) and pv.strip():
+            out["provider"] = pv.strip()
+        return out
+
+    if name == "query_concept_board":
+        out: dict[str, Any] = {"action": "concept_board"}
+        sym = args.get("symbol")
+        kw = args.get("keyword")
+        pv = args.get("provider")
+        if isinstance(sym, str) and sym.strip():
+            out["symbol"] = sym.strip()
+        if isinstance(kw, str) and kw.strip():
+            out["keyword"] = kw.strip()
+        if isinstance(pv, str) and pv.strip():
+            out["provider"] = pv.strip()
+        return out
+
     if name == "reply_chat":
         msg = args.get("message")
         if isinstance(msg, str) and msg.strip():
@@ -215,7 +298,7 @@ def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
             return {"action": "clarify", "clarify_message": msg.strip()}
         return {"action": "clarify", "clarify_message": ""}
 
-    raise DeepSeekError(f"未知路由工具: {name!r}")
+    raise LLMClientError(f"未知路由工具: {name!r}")
 
 
 def _extract_router_assistant_text(message: dict[str, Any]) -> str:
@@ -259,17 +342,17 @@ def _post_json(url: str, payload: dict[str, Any], timeout_sec: float = 30.0) -> 
         except Exception:
             err_body = ""
         snippet = (err_body or str(exc.reason or "")).strip()
-        raise DeepSeekError(f"DeepSeek HTTP {exc.code}: {snippet[:2000]}") from exc
+        raise LLMClientError(f"LLM HTTP {exc.code}: {snippet[:2000]}") from exc
     except URLError as exc:
-        raise DeepSeekError(f"DeepSeek 网络请求失败: {exc}") from exc
+        raise LLMClientError(f"LLM 网络请求失败: {exc}") from exc
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek 请求失败: {exc}") from exc
+        raise LLMClientError(f"LLM 请求失败: {exc}") from exc
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise DeepSeekError(f"DeepSeek 返回非 JSON: {raw[:240]!r}") from exc
+        raise LLMClientError(f"LLM 返回非 JSON: {raw[:240]!r}") from exc
     if isinstance(obj, dict) and obj.get("error"):
-        raise DeepSeekError(f"DeepSeek 返回错误: {obj.get('error')}")
+        raise LLMClientError(f"LLM 返回错误: {obj.get('error')}")
     return obj if isinstance(obj, dict) else {"raw": obj}
 
 
@@ -315,16 +398,16 @@ def _feishu_completion_response_to_route(res: dict[str, Any]) -> dict[str, Any]:
     try:
         msg = res["choices"][0]["message"]
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek 路由(tool)响应结构异常: {res}") from exc
+        raise LLMClientError(f"LLM 路由(tool)响应结构异常: {res}") from exc
     if not isinstance(msg, dict):
-        raise DeepSeekError(f"DeepSeek 路由 message 非对象: {msg!r}")
+        raise LLMClientError(f"LLM 路由 message 非对象: {msg!r}")
     tool_calls = msg.get("tool_calls")
     if tool_calls:
         return _tool_calls_to_routed_dict(tool_calls)
     raw_text = _extract_router_assistant_text(msg)
     if raw_text:
         return {"action": "chat", "chat_reply": raw_text}
-    raise DeepSeekError("DeepSeek 路由未返回 tool_calls，且无 assistant 正文")
+    raise LLMClientError("LLM 路由未返回 tool_calls，且无 assistant 正文")
 
 
 def decide_feishu_route(
@@ -336,7 +419,10 @@ def decide_feishu_route(
     tradable_assets: list[dict[str, Any]] | None = None,
     timeout_sec: float = 12.0,
 ) -> dict[str, Any]:
-    """飞书路由：DeepSeek chat/completions + tools；优先 tool_calls；无 tool_calls 时若有 assistant 正文则视为闲聊（action=chat）。"""
+    """飞书路由：OpenAI-compatible chat/completions + tools；优先 tool_calls；无 tool_calls 时若有 assistant 正文则视为闲聊（action=chat）。
+
+    注：当前默认 provider 是 deepseek，但模块命名与异常已 provider-agnostic。
+    """
     url, payload = _build_feishu_route_payload(
         text=text,
         default_symbol=default_symbol,
@@ -357,7 +443,10 @@ def feishu_route_deepseek_raw_and_routed(
     tradable_assets: list[dict[str, Any]] | None = None,
     timeout_sec: float = 12.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """真实调用 DeepSeek：返回 (chat/completions 完整 JSON, 路由解析 dict)。供调试脚本打印原始响应。"""
+    """真实调用 LLM：返回 (chat/completions 完整 JSON, 路由解析 dict)。供调试脚本打印原始响应。
+
+    注：函数名保留 deepseek 是历史兼容，实际调用 provider 由 runtime config 决定。
+    """
     url, payload = _build_feishu_route_payload(
         text=text,
         default_symbol=default_symbol,
@@ -406,7 +495,7 @@ def generate_decision(
                 "content": (
                     "你是交易分析Agent。你只能基于输入证据给出技术结论，"
                     "禁止杜撰成交、主力资金或官方未提供数据。"
-                    + _DEEPSEEK_JSON_OBJECT_SYSTEM_SUFFIX
+                    + _JSON_OBJECT_SYSTEM_SUFFIX
                 ),
             },
             {"role": "user", "content": json.dumps(prompt_obj, ensure_ascii=False)},
@@ -415,7 +504,7 @@ def generate_decision(
     url = f"{_base_url()}/chat/completions"
     try:
         res = _post_json(url, {**base_payload, "response_format": {"type": "json_object"}})
-    except DeepSeekError as err:
+    except LLMClientError as err:
         if "HTTP 400" in str(err):
             res = _post_json(url, base_payload)
         else:
@@ -423,15 +512,15 @@ def generate_decision(
     try:
         content = res["choices"][0]["message"]["content"]
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek 响应结构异常: {res}") from exc
+        raise LLMClientError(f"LLM 响应结构异常: {res}") from exc
     if not isinstance(content, str):
-        raise DeepSeekError(f"DeepSeek content 非字符串: {content!r}")
+        raise LLMClientError(f"LLM content 非字符串: {content!r}")
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise DeepSeekError(f"DeepSeek content 不是 JSON: {content[:240]!r}") from exc
+        raise LLMClientError(f"LLM content 不是 JSON: {content[:240]!r}") from exc
     if not isinstance(parsed, dict):
-        raise DeepSeekError(f"DeepSeek content JSON 非对象: {parsed!r}")
+        raise LLMClientError(f"LLM content JSON 非对象: {parsed!r}")
     return parsed
 
 
@@ -476,12 +565,12 @@ def generate_feishu_narrative(
     try:
         content = res["choices"][0]["message"]["content"]
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek 叙事响应结构异常: {res}") from exc
+        raise LLMClientError(f"LLM 叙事响应结构异常: {res}") from exc
     if not isinstance(content, str):
-        raise DeepSeekError(f"DeepSeek 叙事 content 非字符串: {content!r}")
+        raise LLMClientError(f"LLM 叙事 content 非字符串: {content!r}")
     text = content.strip()
     if not text:
-        raise DeepSeekError("DeepSeek 叙事返回空正文")
+        raise LLMClientError("LLM 叙事返回空正文")
     return text
 
 
@@ -556,10 +645,10 @@ def generate_grounded_answer(
     try:
         content = res["choices"][0]["message"]["content"]
     except Exception as exc:
-        raise DeepSeekError(f"DeepSeek grounded 响应结构异常: {res}") from exc
+        raise LLMClientError(f"LLM grounded 响应结构异常: {res}") from exc
     if not isinstance(content, str):
-        raise DeepSeekError(f"DeepSeek grounded content 非字符串: {content!r}")
+        raise LLMClientError(f"LLM grounded content 非字符串: {content!r}")
     text = content.strip()
     if not text:
-        raise DeepSeekError("DeepSeek grounded 返回空正文")
+        raise LLMClientError("LLM grounded 返回空正文")
     return {"text": text, "sections": [{"title": "正文", "content": text}], "style": response_mode}

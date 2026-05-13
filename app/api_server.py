@@ -1,113 +1,125 @@
+"""HTTP API 服务层（三层重构 + 统一 Core 版）。
+
+职责收敛为（adapter 层）：
+1. 请求校验
+2. Request schema 转换
+3. 调用统一 agent core
+4. 返回统一 response schema
+
+统一接口：
+- /agent/run：统一 agent 入口（支持 chat/clarify/research/followup/analysis）
+- /health：健康检查
+
+文档参考：
+- docs/AGENT_CORE_UNIFICATION_PLAN.md §6.3
+"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app.agent_service import TaskRunner
+from app.agent_schemas import AgentRequest, AgentResponse
+from app.agent_core import handle_request
 
 
-class AnalyzeRequest(BaseModel):
-    symbol: str = Field(..., description="标的，例如 BTC_USDT")
-    provider: str = Field(default="gateio")
-    interval: str = Field(default="1d")
-    limit: int = Field(default=180, ge=30, le=1000)
-    with_research: bool = Field(default=False)
-    research_n: int = Field(default=5, ge=1, le=50)
-    research_type: str = Field(default="title")
-    research_keyword: str | None = Field(default=None)
-    analysis_style: str = Field(default="auto")
-    question: str | None = Field(default=None, description="可选：触发RAG检索的问题")
+# ============ 统一接口模型 ============
+
+class AgentRunRequest(BaseModel):
+    """统一 Agent 请求模型。
+
+    注：default_symbol / default_interval 现在仅作为 fallback 常量，
+    实际路由由 planner 从 session_state + market_config + ROUTER_POLICY 在运行时推导。
+    """
+    text: str = Field(..., description="用户输入文本")
+    session_id: str | None = Field(default=None, description="会话ID，可选")
+    user_id: str | None = Field(default=None, description="用户ID，可选")
+    default_symbol: str = Field(default="BTC_USDT", description="默认标的（fallback，实际由 planner 推导）")
+    default_interval: str = Field(default="4h", description="默认周期（fallback，实际由 planner 推导）")
+    channel: str = Field(default="http", description="渠道标识")
+
+    # 会话上下文
+    recent_messages: list[dict[str, str]] | None = Field(default=None, description="历史消息（可选）")
+    risk_profile: str | None = Field(default=None, description="风险画像")
+
+    # 执行选项
     use_rag: bool = Field(default=True)
     rag_top_k: int = Field(default=5, ge=1, le=20)
-    use_llm_decision: bool = Field(default=True, description="必须为 True：分析仅支持 LangGraph + DeepSeek")
-    risk_profile: str | None = Field(default=None, description="可选：风险画像（如 保守/均衡/进取 或 单笔亏损阈值）")
+    api_base_url: str = Field(default="http://127.0.0.1:8000")
 
 
-class AnalyzeSubmitResponse(BaseModel):
-    task_id: str
-    status: str
+class AgentRunResponse(BaseModel):
+    """统一 Agent 响应模型。"""
+    task_type: str
+    response_mode: str
+    reply_text: str
+    reply_chunks: list[str] = Field(default_factory=list)
+    facts_bundle: dict[str, Any] | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+    created_ts: float
 
 
-class TaskStatusResponse(BaseModel):
-    task_id: str
-    status: str
-    created_at_utc: str
-    updated_at_utc: str
-    result: dict[str, Any] | None = None
-    error: str | None = None
+# ============ FastAPI 应用 ============
+
+app = FastAPI(title="Stock Analysis Agent API", version="0.2.0")
 
 
-app = FastAPI(title="Stock Analysis Agent API", version="0.1.0")
-runner = TaskRunner()
-TASK_STORE: dict[str, dict[str, Any]] = {}
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _run_task(task_id: str, req: AnalyzeRequest) -> None:
-    row = TASK_STORE.get(task_id)
-    if row is None:
-        return
-    row["status"] = "running"
-    row["updated_at_utc"] = _utc_now_iso()
-    try:
-        result = runner.run_analysis(
-            symbol=req.symbol,
-            provider=req.provider,
-            interval=req.interval,
-            limit=req.limit,
-            with_research=req.with_research,
-            research_n=req.research_n,
-            research_type=req.research_type,
-            research_keyword=req.research_keyword,
-            analysis_style=req.analysis_style,
-            question=req.question,
-            use_rag=req.use_rag,
-            rag_top_k=req.rag_top_k,
-            use_llm_decision=req.use_llm_decision,
-        )
-        if isinstance(result, dict) and req.risk_profile:
-            meta = result.setdefault("meta", {})
-            if isinstance(meta, dict):
-                meta["risk_profile"] = req.risk_profile
-        row["status"] = "completed"
-        row["result"] = result
-    except Exception as exc:
-        row["status"] = "failed"
-        row["error"] = str(exc)
-    row["updated_at_utc"] = _utc_now_iso()
-
+# ============ 健康检查 ============
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/agent/analyze", response_model=AnalyzeSubmitResponse)
-def submit_analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> AnalyzeSubmitResponse:
-    task_id = uuid4().hex
-    now_iso = _utc_now_iso()
-    TASK_STORE[task_id] = {
-        "task_id": task_id,
-        "status": "queued",
-        "created_at_utc": now_iso,
-        "updated_at_utc": now_iso,
-        "result": None,
-        "error": None,
+# ============ 统一 Agent 入口 ============
+
+@app.post("/agent/run", response_model=AgentRunResponse)
+def run_agent(req: AgentRunRequest) -> AgentRunResponse:
+    """统一 Agent 入口。
+
+    支持：chat / clarify / quote / compare / analysis / research / followup
+
+    流程：
+    1. 构造 AgentRequest
+    2. 调用 agent_core.handle_request
+    3. 返回 AgentRunResponse
+    """
+    request_id = uuid4().hex
+    session_id = req.session_id or request_id
+
+    context: dict[str, Any] = {}
+    if req.recent_messages:
+        context["recent_messages"] = req.recent_messages
+    if req.risk_profile:
+        context["risk_profile"] = req.risk_profile
+
+    options: dict[str, Any] = {
+        "use_rag": req.use_rag,
+        "rag_top_k": req.rag_top_k,
+        "api_base_url": req.api_base_url,
     }
-    background_tasks.add_task(_run_task, task_id, req)
-    return AnalyzeSubmitResponse(task_id=task_id, status="queued")
 
+    agent_request = AgentRequest(
+        channel=str(req.channel or "http"),
+        session_id=session_id,
+        text=req.text,
+        user_id=req.user_id,
+        default_symbol=req.default_symbol,
+        default_interval=req.default_interval,
+        context=context,
+        options=options,
+    )
 
-@app.get("/agent/tasks/{task_id}", response_model=TaskStatusResponse)
-def get_task(task_id: str) -> TaskStatusResponse:
-    row = TASK_STORE.get(task_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="task not found")
-    return TaskStatusResponse(**row)
+    agent_response = handle_request(agent_request)
+
+    return AgentRunResponse(
+        task_type=agent_response.task_type,
+        response_mode=agent_response.response_mode,
+        reply_text=agent_response.reply_text,
+        reply_chunks=agent_response.reply_chunks,
+        facts_bundle=agent_response.facts_bundle,
+        meta=agent_response.meta,
+        created_ts=agent_response.created_ts,
+    )

@@ -1,7 +1,12 @@
 # Stock_Analysis — Agent 执行契约（入口）
 
 **适用场景**：在 Cursor 新开 Agent / Composer、或换窗口后**不记得提示词**时，**先读本文件**（一页纸），再按需打开 `AI_股票对话提示.md` 查章节细则。  
-IDE 里另有常驻规则：`.cursor/rules/stock-analysis-agent.mdc`（与本文一致处以二者中更严者为准）。
+IDE 里另有常驻规则：`.cursor/rules/stock-analysis-agent.mdc`（仅保留必须常驻的硬规则；与本文一致处以二者中更严者为准）。
+
+**文档分工（单一主来源）**：
+- **`AGENTS.md`**：只保留快速入口、角色边界、最短执行顺序；适合新窗口 30 秒恢复上下文。
+- **`AI_股票对话提示.md`**：唯一完整条文来源；公式、例外、细则、章节号统一以此为准。
+- **`.cursor/rules/stock-analysis-agent.mdc`**：Cursor 常驻注入的最小硬规则；不重复展开完整流程说明。
 
 ---
 
@@ -102,12 +107,12 @@ python cli/stock_analysis.py --symbol <SYMBOL> --report-only --out-dir output --
 
 ---
 
-## 6) 与长文契约的关系
+## 6) 文档分层与引用关系
 
 | 文档 | 用途 |
 |------|------|
-| **本文件 `AGENTS.md`** | 新窗口 **30 秒恢复上下文**；角色边界 + 路由 + CLI 入口。 |
-| **`AI_股票对话提示.md`** | 全文执行契约：§0.1～§8、§2.1 叙事/技术分栏与冲突、§3.1 公式、§6 复核时间。 |
-| **`.cursor/rules/stock-analysis-agent.mdc`** | Cursor 始终注入的硬规则（含禁止串用数据源）。 |
+| **本文件 `AGENTS.md`** | 入口摘要；保留最短可执行清单，不承载完整公式与例外。 |
+| **`AI_股票对话提示.md`** | 唯一完整执行契约：§0.1～§8、§2.1 叙事/技术分栏与冲突、§3.1 公式、§6 复核时间。 |
+| **`.cursor/rules/stock-analysis-agent.mdc`** | Cursor 常驻硬规则；只保留必须始终生效的约束，不重复整篇操作说明。 |
 
-新增标的、配置字段、目录边界等**细则**以 `AI_股票对话提示.md` 与 `README.md` 为准。
+新增标的、配置字段、目录边界等**细则**以 `AI_股票对话提示.md` 与 `README.md` 为准；若本文件与长文出现表述层级差异，以长文为准。

@@ -6,7 +6,7 @@ from typing import Any
 
 from app.guardrails import ensure_agent_response
 from app.langgraph_flow import run_graph
-from config.runtime_config import get_analysis_config
+from config.runtime_config import get_llm_runtime_settings
 
 
 class TaskRunner:
@@ -42,7 +42,7 @@ class TaskRunner:
             raise RuntimeError("分析已强制为仅 LLM（LangGraph）流程：use_llm_decision 必须为 True。")
         if not _llm_enabled():
             raise RuntimeError(
-                "分析依赖 DeepSeek：请配置环境变量 DEEPSEEK_API_KEY 或 YAML 中 deepseek.api_key，"
+                "分析依赖 LLM：请配置环境变量 LLM_API_KEY / <PROVIDER>_API_KEY，或 YAML 中 llm.providers.<provider>.api_key，"
                 "且勿将 AGENT_ENABLE_LLM 设为 0。"
             )
         payload = run_graph(
@@ -63,8 +63,5 @@ def _llm_enabled() -> bool:
     enabled = os.getenv("AGENT_ENABLE_LLM", "1").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return False
-    if os.getenv("DEEPSEEK_API_KEY", "").strip():
-        return True
-    cfg = get_analysis_config()
-    node = cfg.get("deepseek") if isinstance(cfg.get("deepseek"), dict) else {}
-    return bool(str(node.get("api_key") or "").strip())
+    settings = get_llm_runtime_settings()
+    return bool(str(settings.get("api_key") or "").strip())

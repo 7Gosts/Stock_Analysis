@@ -1,4 +1,4 @@
-"""HTTP 异步分析任务客户端（飞书 / Facade 共用，避免与 feishu_bot_service 循环依赖）。"""
+"""HTTP 异步分析任务客户端（Agent Core / Facade 共用）。"""
 from __future__ import annotations
 
 import time

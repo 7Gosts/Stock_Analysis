@@ -152,7 +152,6 @@ def process_journal(
                         )
             elif evt == "closed_tp":
                 paper_trade_service.create_exit_fill(idea, close_reason="tp", now_utc=now_utc)
-                acct_cfg = get_account_system_config()
                 try:
                     fill_qty = idea.get("fill_qty") or idea.get("calculated_qty", 1.0)
                     entry_price = idea.get("fill_price") or idea.get("entry_price")
@@ -166,8 +165,7 @@ def process_journal(
                             close_reason="tp",
                             now_utc=now_utc,
                         )
-                        if acct_cfg.get("auto_sync_to_journal_ideas", True):
-                            idea["realized_pnl_pct"] = realized_pnl_pct
+                        idea["realized_pnl_pct"] = realized_pnl_pct
                 except Exception:
                     logger.exception(
                         "[JournalService] account_service.close_position failed for idea_id={}",
@@ -175,7 +173,6 @@ def process_journal(
                     )
             elif evt == "closed_sl":
                 paper_trade_service.create_exit_fill(idea, close_reason="sl", now_utc=now_utc)
-                acct_cfg = get_account_system_config()
                 try:
                     fill_qty = idea.get("fill_qty") or idea.get("calculated_qty", 1.0)
                     entry_price = idea.get("fill_price") or idea.get("entry_price")
@@ -189,8 +186,7 @@ def process_journal(
                             close_reason="sl",
                             now_utc=now_utc,
                         )
-                        if acct_cfg.get("auto_sync_to_journal_ideas", True):
-                            idea["realized_pnl_pct"] = realized_pnl_pct
+                        idea["realized_pnl_pct"] = realized_pnl_pct
                 except Exception:
                     logger.exception(
                         "[JournalService] account_service.close_position failed for idea_id={}",

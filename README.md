@@ -21,7 +21,7 @@
 
 - **分层**：`cli/` 只做入口与参数；`app/` 编排、报告写入、**应用侧**台账流程（`journal_service` 等）；**`persistence/`** 集中 PostgreSQL 连接、台账仓库、账户与纸交易写入；`analysis/` 指标与业务规则（`price_feeds` 仅负责 provider 分发与 OHLCV 归一化）；`tools/<provider>/` 存放各数据源 HTTP 客户端。
 - **外部数据**：行情请求不写在 `analysis/` 内部实现里，而是通过 `tools/` 与 `price_feeds` 接入。
-- **可选 LLM**：分析链路可接入 DeepSeek（决策与校验见 `app/`、`tools/deepseek/`）；路由层另有飞书意图路由（function calling）。
+- **可选 LLM**：分析链路可接入 LLM（决策与校验见 `app/`、`tools/llm/`，当前默认 provider 为 DeepSeek）；路由层另有飞书意图路由（function calling）。
 - **预留域**：`market_data/` 计划承接板块/资金流等结构化数据，当前未实现。
 
 ```mermaid
