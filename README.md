@@ -93,7 +93,7 @@ pip install -r requirements.txt
 | `goldapi` | 贵金属 | `GOLD_API_APPKEY` / `GOLD_API_KEY` 等，见客户端与示例配置 |
 | 研报客 | 检索/摘要 | 搜索通常可不配置；下载需 `YANBAOKE_API_KEY` |
 
-贵金属接口细节（URL、period、回退逻辑）见 `tools/goldapi/client.py` 与示例配置。
+贵金属接口细节按官方文档使用 `/api/v1/gold/varieties` 与 `/api/v1/gold/history`；当前在项目内归一化支持 `1h` / `4h` / `1d`。
 
 ---
 
