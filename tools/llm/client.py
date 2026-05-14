@@ -89,7 +89,7 @@ DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路
 interval 仅 15m/30m/1h/4h/1d；用户说短线且未写具体周期时用 short_term_interval_default。
 provider 须与所选标的在 tradable_assets 中的 provider 一致。
 with_research：用户明确要看研报/机构观点时为 true。
-信息不足无法选合法标的或周期用 ask_clarify。"""
+信息不足无法选合法标的或周期时，请调用 reply_chat 自然地反问用户。"""
 
 
 def _feishu_router_tool_definitions() -> list[dict[str, Any]]:
@@ -291,13 +291,6 @@ def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
         if isinstance(msg, str) and msg.strip():
             return {"action": "chat", "chat_reply": msg.strip()}
         return {"action": "chat"}
-
-    if name == "ask_clarify":
-        msg = args.get("message")
-        if isinstance(msg, str) and msg.strip():
-            return {"action": "clarify", "clarify_message": msg.strip()}
-        return {"action": "clarify", "clarify_message": ""}
-
     raise LLMClientError(f"未知路由工具: {name!r}")
 
 

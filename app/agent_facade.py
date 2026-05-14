@@ -25,7 +25,6 @@ from app.executors.facts_bundle import merge_facts_bundle
 from app.executors.multi_asset_compare import run_multi_asset_compare
 from app.executors.quote_snapshot import run_quote_snapshots
 from app.executors.research_summary import run_research_summary
-from app.followup_resolver import build_followup_clarify_message
 from app.formatters.feishu import split_feishu_text
 from app.rag_index import (
     get_or_create_rag_index,
@@ -379,10 +378,7 @@ def handle_user_request(
         output_refs = followup_ctx.get("output_refs") or {}
 
         if not symbol:
-            msg = build_followup_clarify_message(
-                text=text,
-                session_state=session_state or None,
-            )
+            msg = "无法确认你要追问的行情标的，您可以重新输入股票代码或查询对应板块。"
             return {
                 "task_type": "clarify",
                 "response_mode": "quick",

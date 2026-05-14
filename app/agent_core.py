@@ -178,10 +178,7 @@ def handle_request(request: AgentRequest) -> AgentResponse:
                 output_refs = followup_ctx.get("output_refs") or {}
 
                 if not symbol:
-                    msg = default_clarify_message({
-                        "last_symbol": session_state.last_symbol,
-                        "last_interval": session_state.last_interval,
-                    })
+                    msg = "无法确认你要追问的行情标的，您可以重新输入股票代码或查询对应板块。"
                     return AgentResponse.clarify(message=msg, meta={"route": dict(route)})
 
                 facts = rag_index.get_facts_for_followup(

@@ -30,10 +30,17 @@ def _looks_like_followup(text: str) -> bool:
     for pat in _FOLLOWUP_PATTERNS:
         if re.search(pat, raw, re.I):
             return True
-    # 短文本且无标的关键词，可能是追问
-    if len(raw) < 15 and not re.search(r"[A-Z]{2,4}[_\d]", raw, re.I):
-        # 不包含明确标的编码，可能是追问
-        return True
+    # 短文本且无标的关键词，可能是追问——但要排除明确的新请求
+    # 排除条件：包含研报/板块/概念/行业等关键词，或包含"看下/查下/搜一下"等主动请求词
+    _NEW_REQUEST_PATTERNS = [
+        r"(看下|看|查下|查|搜下|搜一下|找下|找一下|帮我|请|麻烦)",
+        r"(研报|板块|概念|行业|主题|观点|机构)",
+        r"(分析|行情|走势|技术)",
+    ]
+    for pat in _NEW_REQUEST_PATTERNS:
+        if re.search(pat, raw, re.I):
+            return False  # 明确的新请求，不是追问
+            
     return False
 
 
@@ -110,37 +117,3 @@ def _extract_followup_type(text: str) -> str:
     if re.search(r"(为什么|原因|逻辑|理由|怎么|如何)", raw, re.I):
         return "rationale"
     return "general"
-
-
-def build_followup_clarify_message(
-    *,
-    text: str,
-    session_state: SessionState,
-) -> str:
-    """生成追问澄清消息（当无法定位时）。"""
-    if session_state.last_symbol:
-        return (
-            f"你是想追问上一轮 {session_state.last_symbol} {session_state.last_interval or ''} 的分析吗？"
-            "如果是，请直接说你想了解哪方面（入场、止损、止盈、触发状态等）。"
-        )
-    return (
-        "我没定位到你指的是哪一轮分析。"
-        "可以补一句标的名称或周期，或让我重新分析某个标的。"
-    )
-
-
-def default_clarify_message(route_context: dict[str, Any] | None = None) -> str:
-    """统一生成可见澄清（文档要求：永不返回空 clarify_message）。"""
-    ctx = route_context or {}
-    last_sym = ctx.get("last_symbol")
-    last_iv = ctx.get("last_interval")
-    if last_sym:
-        return (
-            f"我这次没有稳定拿到可回答的上下文。"
-            f"你可以补一句标的/周期（比如「{last_sym} {last_iv or '日线'}」），"
-            f"或让我按上一轮 {last_sym} 继续分析。"
-        )
-    return (
-        "我这次没有稳定拿到可回答的上下文。"
-        "你可以补一句标的/周期，或让我重新分析。"
-    )

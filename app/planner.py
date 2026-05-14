@@ -231,10 +231,7 @@ def plan_user_message(
 
     # 空文本 → 返回非空澄清
     if not raw:
-        clarify_msg = default_clarify_message({
-            "last_symbol": ctx_sym,
-            "last_interval": ctx_interval,
-        })
+        clarify_msg = "你想了解什么行情或者研报呢？可以告诉我股票代码或行业版块。"
         tt: TaskType = "clarify"
         return {
             "action": "clarify",
@@ -278,26 +275,7 @@ def plan_user_message(
                     followup_context=followup_result,
                 ),
             }
-        # 追问但无法定位 → 返回澄清
-        clarify_msg = f"我没定位到你指的是哪一轮分析。{ctx_sym or ''} {ctx_interval or ''} 是上一轮标的吗？请确认标的和周期。"
-        tt = "clarify"
-        return {
-            "action": "clarify",
-            "clarify_message": clarify_msg,
-            "task_type": tt,
-            "response_mode": plan_response_mode(tt),
-            "task_plan": build_task_plan(
-                task_type=tt,
-                response_mode=plan_response_mode(tt),
-                text=raw,
-                symbols=[],
-                interval=base_interval,
-                provider=base_provider,
-                with_research=False,
-                research_keyword=None,
-                question=clarify_msg,
-            ),
-        }
+        # 追问但无法定位 → 让它回落到下方的 LLM 进行意图分析发现
 
     # 2. 纯研报请求：不要求标的与周期
     if _looks_like_research_only_request(raw):
