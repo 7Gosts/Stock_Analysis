@@ -22,6 +22,7 @@ def merge_facts_bundle(
     memory_facts: dict[str, Any] | None = None,
     followup_facts: dict[str, Any] | None = None,
     followup_type: str | None = None,
+    sim_account_facts: dict[str, Any] | None = None,
     risk_flags: list[str] | None = None,
     evidence_sources: list[dict[str, Any]] | None = None,
     trace: dict[str, Any] | None = None,
@@ -39,6 +40,7 @@ def merge_facts_bundle(
         memory_facts: 长期记忆（弱补充）
         followup_facts: 追问事实（followup，从 RAG 获取）
         followup_type: 追问类型（entry/stop/tp/status/rationale/general）
+        sim_account_facts: 模拟账户 capability 原始字典（domain/intent/summary/tables/metrics）
         risk_flags: 风险标记
         evidence_sources: 证据来源（必须包含 source_path、source_type、symbol）
         trace: 执行轨迹（不直接展示给终端用户）
@@ -77,6 +79,9 @@ def merge_facts_bundle(
     if task_type == "followup" and followup_facts:
         bundle["followup_facts"] = followup_facts if isinstance(followup_facts, dict) else {}
         bundle["followup_type"] = str(followup_type or "general")
+
+    if task_type == "sim_account" and sim_account_facts:
+        bundle["sim_account_facts"] = sim_account_facts if isinstance(sim_account_facts, dict) else {}
 
     # 长期记忆（弱补充，不作为主事实源）
     if memory_facts:

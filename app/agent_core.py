@@ -1,25 +1,10 @@
-"""统一 Agent Core 入口（三层重构 + 统一 Core 版）。
+"""统一 Agent Core 入口。
 
 这是项目的智能体主入口，所有平台（飞书、CLI、HTTP）都应调用它。
 
-职责：
-1. 消费 AgentRequest
-2. 识别任务类型（task_type）
-3. 会话状态解析
-4. 本地 RAG 检索
-5. 执行器选择
-6. 聚合 facts_bundle
-7. 产出 AgentResponse
-
-设计原则：
-1. 飞书、CLI、HTTP 都通过它进入系统
-2. 不包含任何平台特有的逻辑
-3. SessionStateStore 和 RAG 由 core 使用
-4. 历史消息只作为弱语境，不覆盖本地结构化事实
-
-文档参考：
-- docs/AGENT_CORE_UNIFICATION_PLAN.md
-- docs/AGENT_CORE_UNIFICATION_EXECUTION_PROMPT.md
+流程：AgentRequest → intent_pipeline/planner → unified graph → AgentResponse
+所有 task_type 统一经由 agent_graph 的 capability→compose→session→compact 管道，
+不再有平台分支或 facade 委托。
 """
 from __future__ import annotations
 
@@ -35,13 +20,14 @@ from app.agent_schemas import (
     AgentError,
     AgentErrorCode,
     AgentErrorStage,
-    DEFAULT_FALLBACK_MESSAGE,
     TaskType,
     ResponseMode,
 )
 from app.planner import plan_user_message, log_routed_preview, AgentRoutingError
 from app.rag_index import get_or_create_rag_index, RagIndex
 from app.session_state import SessionState, SessionStateStore, get_global_session_store
+from app.agent_graph import run_post_route_chat_graph, unified_chat_agent_enabled
+from app.intent_detectors import apply_intent_pipeline
 
 
 def _repo_root_default() -> Path:
@@ -49,32 +35,10 @@ def _repo_root_default() -> Path:
 
 
 def _get_session_state(request: AgentRequest, store: SessionStateStore) -> SessionState:
-    """从请求中提取或获取会话状态。"""
     ctx_state = request.context.get("session_state")
     if isinstance(ctx_state, SessionState):
         return ctx_state
     return store.get(request.session_id)
-
-
-def _build_context_from_request(request: AgentRequest) -> dict[str, Any]:
-    """从请求构建 agent_facade 需要的 context。"""
-    ctx: dict[str, Any] = {
-        "default_symbol": request.default_symbol,
-        "default_interval": request.default_interval,
-        "user_message_for_chunks": request.text,
-        "repo_root": request.options.get("repo_root") or _repo_root_default(),
-    }
-
-    if request.context.get("recent_messages"):
-        ctx["recent_messages"] = request.context["recent_messages"]
-
-    if request.options.get("use_rag"):
-        ctx["use_rag"] = request.options["use_rag"]
-
-    if request.options.get("rag_top_k"):
-        ctx["rag_top_k"] = request.options["rag_top_k"]
-
-    return ctx
 
 
 def _build_repair_recent_messages(
@@ -99,31 +63,8 @@ def _build_repair_recent_messages(
     return repaired
 
 
-def _agent_error_from_meta(meta: dict[str, Any]) -> AgentError | None:
-    """从执行器返回的 meta 中恢复结构化错误。"""
-    error_code = meta.get("error_code")
-    error_stage = meta.get("error_stage")
-    if not error_code or not error_stage:
-        return None
-
-    try:
-        code = AgentErrorCode(str(error_code))
-        stage = AgentErrorStage(str(error_stage))
-    except ValueError:
-        return None
-
-    return AgentError(
-        code=code,
-        stage=stage,
-        recoverable=bool(meta.get("recoverable", False)),
-        message=str(meta.get("error_message") or meta.get("error") or "execute_error"),
-        termination_reason=str(meta.get("termination_reason") or "") or None,
-        context=dict(meta.get("error_context") or {}),
-    )
-
-
 def _classify_execute_exception(*, exc: Exception, task_type: str) -> AgentError:
-    """对执行阶段异常做最小可用的结构化分类。"""
+    """对执行阶段异常做结构化分类。"""
     raw = str(exc)
     lower = raw.lower()
     upper = raw.upper()
@@ -144,6 +85,16 @@ def _classify_execute_exception(*, exc: Exception, task_type: str) -> AgentError
             recoverable=True,
             message=raw,
             termination_reason="rag_unavailable",
+        )
+
+    if task_type == "followup" and "追问所需的分析产物不存在" in raw:
+        return AgentError(
+            code=AgentErrorCode.followup_output_missing,
+            stage=AgentErrorStage.execute,
+            recoverable=True,
+            message=raw,
+            termination_reason="followup_output_missing",
+            context={},
         )
 
     if "postgres" in lower or "数据库" in raw:
@@ -191,77 +142,6 @@ def _classify_execute_exception(*, exc: Exception, task_type: str) -> AgentError
     )
 
 
-def _execute_capability_task(
-    *,
-    task_type: TaskType,
-    route: dict[str, Any],
-    request: AgentRequest,
-    session_store: SessionStateStore,
-) -> tuple[AgentResponse, bool] | None:
-    """执行统一 capability 任务；当前用于收口 sim_account。"""
-    if task_type != "sim_account":
-        return None
-
-    from app.capabilities import view_sim_account_state
-
-    scope = str(route.get("scope") or "overview").strip()
-    account_id = route.get("account_id") or None
-    symbol = route.get("symbol") or None
-
-    try:
-        cap_result = view_sim_account_state(
-            scope=scope,
-            account_id=account_id,
-            symbol=symbol,
-        )
-    except Exception as cap_exc:
-        logger.warning("[AgentCore] capability_error task_type={} exc={}", task_type, cap_exc)
-        agent_error = _classify_execute_exception(exc=cap_exc, task_type=task_type)
-        session_store.record_error(
-            request.session_id,
-            error_code=agent_error.code.value,
-            error_stage=agent_error.stage.value,
-            error_message=str(cap_exc),
-            recoverable=agent_error.recoverable,
-        )
-        session_store.record_final_termination(
-            request.session_id,
-            termination_reason=agent_error.termination_reason or agent_error.code.value,
-            final_error_code=agent_error.code.value,
-        )
-        return (
-            AgentResponse.error(
-                error_msg=str(cap_exc),
-                fallback_text="模拟账户数据暂时不可用，请稍后重试。",
-                agent_error=agent_error,
-            ),
-            False,
-        )
-
-    meta: dict[str, Any] = {
-        "route": dict(route),
-        "domain": cap_result.domain,
-        "intent": cap_result.intent,
-        "evidence_sources": cap_result.evidence_sources,
-    }
-    if cap_result.meta:
-        meta["capability_meta"] = dict(cap_result.meta)
-
-    reply_text = str(cap_result.summary or "").strip()
-    reply_chunks = [reply_text] if reply_text else []
-    return (
-        AgentResponse(
-            task_type=task_type,
-            response_mode=str(route.get("response_mode") or "quick"),
-            reply_text=reply_text,
-            reply_chunks=reply_chunks,
-            facts_bundle=cap_result.to_dict(),
-            meta=meta,
-        ),
-        True,
-    )
-
-
 def handle_request(request: AgentRequest) -> AgentResponse:
     """统一 Agent Core 入口函数。
 
@@ -270,56 +150,41 @@ def handle_request(request: AgentRequest) -> AgentResponse:
 
     Returns:
         统一响应对象（包含 reply_text、reply_chunks、facts_bundle、meta）
-
-    流程：
-    1. 获取会话状态（SessionStateStore）
-    2. 获取 RAG 索引
-    3. 调用 planner 进行意图路由
-    4. 调用执行器
-    5. 聚合 facts_bundle
-    6. 更新会话状态
-    7. 返回 AgentResponse
     """
     start_ts = time.time()
 
-    # 1. 获取会话状态存储，重置本轮路由尝试次数
     session_store = get_global_session_store()
     session_state = _get_session_state(request, session_store)
     session_store.reset_route_attempts(request.session_id)
 
-    # 2. 获取 RAG 索引
     repo_root = _repo_root_default()
     rag_index = request.context.get("rag_index")
 
     route: dict[str, Any] = {}
     task_type: TaskType = "analysis"
-    response_mode: ResponseMode = "analysis"
-    action = ""
     route_succeeded = False
     request_succeeded = False
     recent_messages = request.context.get("recent_messages")
     reroute_recent_messages = list(recent_messages) if isinstance(recent_messages, list) else None
     max_route_attempts = 2
 
-    # 3. 调用 planner 进行意图路由
-    # 4. 调用 agent_facade 执行
-    facade_ctx = _build_context_from_request(request)
-    facade_ctx["session_state"] = session_state
-
     try:
         if rag_index is None:
             rag_index = get_or_create_rag_index(repo_root / "output")
-        facade_ctx["rag_index"] = rag_index
 
         for attempt in range(1, max_route_attempts + 1):
             try:
-                route = plan_user_message(
-                    request.text,
-                    default_symbol=request.default_symbol,
-                    default_interval=request.default_interval,
-                    session_state=session_state,
-                    recent_messages=reroute_recent_messages,
-                )
+                route = None
+                if unified_chat_agent_enabled():
+                    route = apply_intent_pipeline(request.text, session_state)
+                if route is None:
+                    route = plan_user_message(
+                        request.text,
+                        default_symbol=request.default_symbol,
+                        default_interval=request.default_interval,
+                        session_state=session_state,
+                        recent_messages=reroute_recent_messages,
+                    )
                 route_succeeded = True
                 break
             except AgentRoutingError as route_exc:
@@ -386,248 +251,54 @@ def handle_request(request: AgentRequest) -> AgentResponse:
         log_routed_preview(route)
 
         task_type = str(route.get("task_type") or "analysis")
-        response_mode = str(route.get("response_mode") or "analysis")
-        action = str(route.get("action") or "").strip().lower()
-        facade_ctx["route"] = route
 
-        capability_result = _execute_capability_task(
-            task_type=task_type,
+        # 统一图：所有 task_type 经由 agent_graph 的 capability→compose→session→compact
+        if unified_chat_agent_enabled():
+            try:
+                resp = run_post_route_chat_graph(
+                    route=route,
+                    request=request,
+                    session_state=session_state,
+                    session_store=session_store,
+                    rag_index=rag_index,
+                )
+                request_succeeded = True
+                return resp
+            except Exception as exc:
+                logger.warning("[AgentCore] unified_graph_error exc={}", exc)
+                agent_error = _classify_execute_exception(exc=exc, task_type=task_type)
+                session_store.record_error(
+                    request.session_id,
+                    error_code=agent_error.code.value,
+                    error_stage=agent_error.stage.value,
+                    error_message=str(exc),
+                    recoverable=agent_error.recoverable,
+                )
+                session_store.record_final_termination(
+                    request.session_id,
+                    termination_reason=agent_error.termination_reason or agent_error.code.value,
+                    final_error_code=agent_error.code.value,
+                )
+                return AgentResponse.error(
+                    error_msg=str(exc),
+                    fallback_text="分析执行失败。请稍后重试或简化问题。",
+                    agent_error=agent_error,
+                )
+
+        # AGENT_UNIFIED_GRAPH=0 时，走简化直出路径（无 facade 委托）
+        return _fallback_direct_execute(
             route=route,
             request=request,
+            task_type=task_type,
+            rag_index=rag_index,
             session_store=session_store,
+            session_state=session_state,
         )
-        if capability_result is not None:
-            response, request_succeeded = capability_result
-            return response
 
-        # 飞书适配：调用现有 agent_facade（其他 task_type）
-        if request.channel == "feishu":
-            from app.agent_facade import handle_user_request as _handle_user_request_impl
-            result = _handle_user_request_impl(
-                text=request.text,
-                channel=request.channel,
-                user_id=request.user_id,
-                context=facade_ctx,
-            )
-            result_meta = dict(result.get("meta") or {})
-            agent_error = _agent_error_from_meta(result_meta)
-            if agent_error is not None:
-                session_store.record_error(
-                    request.session_id,
-                    error_code=agent_error.code.value,
-                    error_stage=agent_error.stage.value,
-                    error_message=agent_error.message,
-                    recoverable=agent_error.recoverable,
-                )
-                session_store.record_final_termination(
-                    request.session_id,
-                    termination_reason=agent_error.termination_reason or agent_error.code.value,
-                    final_error_code=agent_error.code.value,
-                )
-                return AgentResponse.error(
-                    error_msg=agent_error.message,
-                    fallback_text=str(result.get("final_text") or DEFAULT_FALLBACK_MESSAGE),
-                    meta=result_meta,
-                    agent_error=agent_error,
-                )
-            request_succeeded = True
-            return AgentResponse(
-                task_type=str(result.get("task_type") or task_type),
-                response_mode=str(result.get("response_mode") or response_mode),
-                reply_text=str(result.get("final_text") or DEFAULT_FALLBACK_MESSAGE),
-                reply_chunks=list(result.get("reply_chunks") or []),
-                facts_bundle=result.get("facts_bundle"),
-                meta=dict(result.get("meta") or {}),
-            )
-
-        # HTTP/CLI 适配：简化路径
-        else:
-            # chat 直接返回
-            if task_type == "chat":
-                msg = str(route.get("chat_reply") or "").strip()
-                if not msg:
-                    raise AgentRoutingError(
-                        "chat route missing reply text",
-                        code=AgentErrorCode.route_missing_chat_reply,
-                        recoverable=True,
-                        termination_reason="llm_output_invalid",
-                    )
-                request_succeeded = True
-                return AgentResponse(
-                    task_type=task_type,
-                    response_mode="quick",
-                    reply_text=msg,
-                    reply_chunks=[msg],
-                    facts_bundle=None,
-                    meta={"route": dict(route)},
-                )
-
-            # followup：从 RAG 获取
-            if task_type == "followup":
-                followup_ctx = route.get("followup_context") or {}
-                symbol = followup_ctx.get("symbol")
-                interval = followup_ctx.get("interval")
-                output_refs = followup_ctx.get("output_refs") or {}
-
-                if not symbol:
-                    raise AgentRoutingError(
-                        "followup route missing symbol",
-                        code=AgentErrorCode.followup_missing_symbol,
-                        recoverable=True,
-                        termination_reason="followup_context_invalid",
-                    )
-
-                facts = rag_index.get_facts_for_followup(
-                    symbol, interval=interval,
-                    output_ref_path=output_refs.get("ai_overview_path"),
-                )
-
-                if not facts.get("found") or not isinstance(facts.get("overview"), dict):
-                    agent_error = AgentError(
-                        code=AgentErrorCode.followup_output_missing,
-                        stage=AgentErrorStage.execute,
-                        recoverable=True,
-                        message="追问所需的分析产物不存在或无法读取",
-                        termination_reason="followup_output_missing",
-                        context={
-                            "symbol": symbol,
-                            "interval": interval,
-                            "output_ref_path": output_refs.get("ai_overview_path"),
-                        },
-                    )
-                    session_store.record_error(
-                        request.session_id,
-                        error_code=agent_error.code.value,
-                        error_stage=agent_error.stage.value,
-                        error_message=agent_error.message,
-                        recoverable=agent_error.recoverable,
-                    )
-                    session_store.record_final_termination(
-                        request.session_id,
-                        termination_reason=agent_error.termination_reason or agent_error.code.value,
-                        final_error_code=agent_error.code.value,
-                    )
-                    return AgentResponse.error(
-                        error_msg=agent_error.message,
-                        fallback_text="我这次没拿到上一轮分析产物。你可以让我重新分析一次。",
-                        agent_error=agent_error,
-                    )
-
-                reply = _build_followup_reply(facts, request.text)
-
-                from app.executors.facts_bundle import merge_facts_bundle, build_evidence_source
-                fb = merge_facts_bundle(
-                    task_type="followup",
-                    response_mode="followup",
-                    user_question=request.text,
-                    symbols=[symbol],
-                    followup_facts=facts,
-                    evidence_sources=[build_evidence_source(
-                        source_path=facts.get("source_path", "rag:index"),
-                        source_type="kline",
-                        symbol=symbol,
-                    )],
-                    trace={"executors": ["rag_followup"]},
-                )
-
-                request_succeeded = True
-                return AgentResponse(
-                    task_type="followup",
-                    response_mode="followup",
-                    reply_text=reply,
-                    reply_chunks=[reply],
-                    facts_bundle=fb,
-                    meta={"route": dict(route), "symbol": symbol},
-                )
-
-            # research：从 RAG 或实时检索
-            if task_type == "research":
-                task_plan = route.get("task_plan") if isinstance(route.get("task_plan"), dict) else {}
-                kw = str(task_plan.get("research_keyword") or request.text).strip()
-
-                hits = rag_index.query(kw, top_k=5, source_type_filter="research")
-                if hits:
-                    research_facts = {"ok": True, "keyword": kw, "items": []}
-                    for hit in hits:
-                        research_facts["items"].append({
-                            "title": hit.get("snippet", "")[:50],
-                            "source_path": hit.get("source_path"),
-                            "score": hit.get("score"),
-                        })
-                else:
-                    from app.executors.research_summary import run_research_summary
-                    research_facts = run_research_summary(keyword=kw, n=5)
-
-                reply = _build_research_reply(research_facts)
-
-                from app.executors.facts_bundle import merge_facts_bundle, build_evidence_source
-                fb = merge_facts_bundle(
-                    task_type="research",
-                    response_mode="narrative",
-                    user_question=request.text,
-                    symbols=[],
-                    research_facts=research_facts,
-                    evidence_sources=[build_evidence_source(
-                        source_path="yanbaoke:search",
-                        source_type="research",
-                    )],
-                    trace={"executors": ["research_summary"], "keyword": kw},
-                )
-
-                request_succeeded = True
-                return AgentResponse(
-                    task_type="research",
-                    response_mode="narrative",
-                    reply_text=reply,
-                    reply_chunks=[reply],
-                    facts_bundle=fb,
-                    meta={"route": dict(route), "research_keyword": kw},
-                )
-
-            # analysis / quote / compare：调用 agent_facade
-            from app.agent_facade import handle_user_request as _handle_user_request_impl
-            result = _handle_user_request_impl(
-                text=request.text,
-                channel=request.channel,
-                user_id=request.user_id,
-                context=facade_ctx,
-            )
-            result_meta = dict(result.get("meta") or {})
-            agent_error = _agent_error_from_meta(result_meta)
-            if agent_error is not None:
-                session_store.record_error(
-                    request.session_id,
-                    error_code=agent_error.code.value,
-                    error_stage=agent_error.stage.value,
-                    error_message=agent_error.message,
-                    recoverable=agent_error.recoverable,
-                )
-                session_store.record_final_termination(
-                    request.session_id,
-                    termination_reason=agent_error.termination_reason or agent_error.code.value,
-                    final_error_code=agent_error.code.value,
-                )
-                return AgentResponse.error(
-                    error_msg=agent_error.message,
-                    fallback_text=str(result.get("final_text") or DEFAULT_FALLBACK_MESSAGE),
-                    meta=result_meta,
-                    agent_error=agent_error,
-                )
-            request_succeeded = True
-            return AgentResponse(
-                task_type=str(result.get("task_type") or task_type),
-                response_mode=str(result.get("response_mode") or response_mode),
-                reply_text=str(result.get("final_text") or DEFAULT_FALLBACK_MESSAGE),
-                reply_chunks=list(result.get("reply_chunks") or []),
-                facts_bundle=result.get("facts_bundle"),
-                meta=dict(result.get("meta") or {}),
-            )
     except Exception as exc:
-        # 其他执行阶段错误（未分类）
         logger.warning("[AgentCore] executor_error exc={}", exc)
         agent_error = _classify_execute_exception(exc=exc, task_type=task_type)
 
-        # 记录错误到 session state
         session_store.record_error(
             request.session_id,
             error_code=agent_error.code.value,
@@ -636,7 +307,6 @@ def handle_request(request: AgentRequest) -> AgentResponse:
             recoverable=agent_error.recoverable,
         )
 
-        # 记录最终终止状态
         session_store.record_final_termination(
             request.session_id,
             termination_reason=agent_error.termination_reason or agent_error.code.value,
@@ -649,8 +319,7 @@ def handle_request(request: AgentRequest) -> AgentResponse:
         )
 
     finally:
-        # 5. 更新会话状态（记录本轮 symbols）
-        if route_succeeded:
+        if route_succeeded and not request_succeeded:
             task_plan = route.get("task_plan") if isinstance(route.get("task_plan"), dict) else {}
             symbols = task_plan.get("symbols") or []
             interval = task_plan.get("interval") or request.default_interval
@@ -659,7 +328,7 @@ def handle_request(request: AgentRequest) -> AgentResponse:
 
             session_store.update_from_route(
                 request.session_id,
-                action=action,
+                action=str(route.get("action") or task_type),
                 task_type=task_type,
                 symbol=symbols[0] if symbols else None,
                 symbols=symbols,
@@ -668,8 +337,6 @@ def handle_request(request: AgentRequest) -> AgentResponse:
                 question=question,
             )
 
-        # 6. 记录成功状态（如果没有异常）
-        # 注意：如果有异常，错误记录已经在 except block 中完成
         try:
             if route_succeeded and request_succeeded:
                 session_store.record_success(
@@ -677,60 +344,57 @@ def handle_request(request: AgentRequest) -> AgentResponse:
                     termination_reason="success",
                 )
         except Exception:
-            # 忽略状态记录失败，不影响主流程
             pass
+
+
+def _fallback_direct_execute(
+    *,
+    route: dict[str, Any],
+    request: AgentRequest,
+    task_type: str,
+    rag_index: Any,
+    session_store: SessionStateStore,
+    session_state: SessionState,
+) -> AgentResponse:
+    """AGENT_UNIFIED_GRAPH=0 时的简化直出路径。
+
+    不再委托 agent_facade，而是直接调用统一图（保证行为一致）。
+    此函数仅在环境变量显式关闭统一图时被调用。
+    """
+    try:
+        resp = run_post_route_chat_graph(
+            route=route,
+            request=request,
+            session_state=session_state,
+            session_store=session_store,
+            rag_index=rag_index,
+        )
+        return resp
+    except Exception as exc:
+        logger.warning("[AgentCore] fallback_direct_execute_error exc={}", exc)
+        agent_error = _classify_execute_exception(exc=exc, task_type=task_type)
+        session_store.record_error(
+            request.session_id,
+            error_code=agent_error.code.value,
+            error_stage=agent_error.stage.value,
+            error_message=str(exc),
+            recoverable=agent_error.recoverable,
+        )
+        session_store.record_final_termination(
+            request.session_id,
+            termination_reason=agent_error.termination_reason or agent_error.code.value,
+            final_error_code=agent_error.code.value,
+        )
+        return AgentResponse.error(
+            error_msg=str(exc),
+            fallback_text="分析执行失败。请稍后重试或简化问题。",
+            agent_error=agent_error,
+        )
 
 
 def run_agent(request: AgentRequest) -> AgentResponse:
     """run_agent 是 handle_request 的别名。"""
     return handle_request(request)
-
-
-def _build_followup_reply(facts: dict[str, Any], question: str) -> str:
-    """构建追问回复（简化版）。"""
-    lines: list[str] = ["【追问回复】"]
-    ov = facts.get("overview")
-    if isinstance(ov, dict):
-        items = ov.get("items")
-        if isinstance(items, list) and items:
-            it = items[0] if isinstance(items[0], dict) else {}
-            stats = it.get("stats") or {}
-            wy = it.get("wyckoff_123_v1") or {}
-            sel = wy.get("selected_setup") or {}
-            triggered = sel.get("triggered")
-            triggered_text = "待触发" if triggered is False else ("已触发" if triggered is True else "未知")
-
-            lines.append(f" · 标的：{it.get('symbol') or '?'} {it.get('interval') or ''}")
-            lines.append(f" · 趋势：{stats.get('trend') or '未知'}")
-            lines.append(f" · 触发状态：{triggered_text}")
-            if sel.get("entry"):
-                lines.append(f" · 入场参考：{sel.get('entry')}")
-            if sel.get("stop"):
-                lines.append(f" · 止损参考：{sel.get('stop')}")
-            if sel.get("tp1"):
-                lines.append(f" · 止盈1：{sel.get('tp1')}")
-        else:
-            lines.append(" · 未找到结构化分析数据")
-    else:
-        lines.append(" · 无有效分析产物")
-    lines.append("仅供技术分析与程序化演示，不构成投资建议。")
-    return "\n".join(lines)
-
-
-def _build_research_reply(facts: dict[str, Any]) -> str:
-    """构建研报回复（简化版）。"""
-    if not facts.get("ok"):
-        return f"研报检索暂不可用：{facts.get('error') or 'unknown'}。仅供技术分析与程序化演示。"
-
-    lines: list[str] = [f"【研报线索】关键词：{facts.get('keyword') or ''}"]
-    for it in facts.get("items") or []:
-        if not isinstance(it, dict):
-            continue
-        t = str(it.get("title") or "").strip()
-        if t:
-            lines.append(f" · {t}")
-    lines.append("以上为检索摘要线索，非官方观点背书。仅供技术分析与程序化演示。")
-    return "\n".join(lines)
 
 
 # ============ 兼容旧接口 ============
@@ -742,10 +406,7 @@ def handle_user_request_compat(
     user_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """兼容旧 agent_facade.handle_user_request 接口。
-
-    内部转换为 AgentRequest -> handle_request -> AgentResponse -> dict
-    """
+    """兼容旧 agent_facade.handle_user_request 接口。"""
     ctx = context or {}
     request = AgentRequest(
         channel=str(channel),

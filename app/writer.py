@@ -76,6 +76,7 @@ def write_grounded_reply(
     task_type: str,
     response_mode: str,
     channel: str = "feishu",
+    display_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Grounded writer：只引用 facts_bundle；失败抛 LLMClientError 由上层降级。"""
     _ = channel
@@ -84,6 +85,7 @@ def write_grounded_reply(
         user_question=user_question,
         task_type=task_type,
         response_mode=response_mode,
+        display_preferences=display_preferences,
     )
 
 
@@ -102,6 +104,7 @@ def safe_grounded_write(
     user_question: str | None,
     task_type: str,
     response_mode: str,
+    display_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not grounded_writer_enabled():
         return None
@@ -111,6 +114,7 @@ def safe_grounded_write(
             user_question=user_question,
             task_type=task_type,
             response_mode=response_mode,
+            display_preferences=display_preferences,
         )
     except (LLMClientError, Exception):
         return None

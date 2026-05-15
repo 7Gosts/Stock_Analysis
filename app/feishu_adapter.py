@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -378,6 +379,10 @@ def get_recent_messages(
             text = str(it.get("text") or "").strip()
             if role in {"user", "assistant"} and text:
                 out.append({"role": role, "text": text})
+        max_pairs = int(os.getenv("AGENT_RECENT_MESSAGE_KEEP_PAIRS", "12"))
+        max_items = max(2, max_pairs * 2)
+        if len(out) > max_items:
+            out = out[-max_items:]
         return out
     return []
 

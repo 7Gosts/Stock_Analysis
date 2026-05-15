@@ -12,7 +12,7 @@ class TestAgentLlmRequired(unittest.TestCase):
         with patch("app.agent_service._llm_enabled", return_value=False):
             with self.assertRaises(RuntimeError) as ctx:
                 runner.run_analysis(symbol="BTC_USDT", provider="gateio", interval="1d")
-        self.assertIn("DeepSeek", str(ctx.exception))
+        self.assertIn("LLM_API_KEY", str(ctx.exception))
 
     def test_raises_when_use_llm_decision_false(self) -> None:
         runner = TaskRunner()

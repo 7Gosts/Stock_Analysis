@@ -47,6 +47,13 @@ class SessionState:
     last_question: str | None = None
     last_output_refs: dict[str, str] = field(default_factory=dict)  # ai_overview_path, full_report_path 等
 
+    # 聊天 Agent：上一轮事实快照（供展示修正复用，非交易所成交事实源）
+    last_facts_bundle: dict[str, Any] = field(default_factory=dict)
+    last_display_preferences: dict[str, Any] = field(default_factory=dict)
+    last_sim_account_scope: str | None = None
+    history_version: int = 0
+    compacted_summary: str | None = None
+
     updated_ts: float = field(default_factory=time.time)
 
     # 容错闭环字段
@@ -66,6 +73,11 @@ class SessionState:
             "last_provider": self.last_provider,
             "last_question": self.last_question,
             "last_output_refs": self.last_output_refs,
+            "last_facts_bundle": self.last_facts_bundle,
+            "last_display_preferences": self.last_display_preferences,
+            "last_sim_account_scope": self.last_sim_account_scope,
+            "history_version": self.history_version,
+            "compacted_summary": self.compacted_summary,
             "updated_ts": self.updated_ts,
             # 新增字段
             "route_attempts": self.route_attempts,
@@ -86,6 +98,11 @@ class SessionState:
             last_provider=d.get("last_provider"),
             last_question=d.get("last_question"),
             last_output_refs=dict(d.get("last_output_refs") or {}),
+            last_facts_bundle=dict(d.get("last_facts_bundle") or {}),
+            last_display_preferences=dict(d.get("last_display_preferences") or {}),
+            last_sim_account_scope=d.get("last_sim_account_scope"),
+            history_version=int(d.get("history_version") or 0),
+            compacted_summary=d.get("compacted_summary"),
             updated_ts=float(d.get("updated_ts") or time.time()),
             # 新增字段
             route_attempts=int(d.get("route_attempts") or 0),
@@ -309,7 +326,7 @@ class SessionStateStore:
         """
         st = self.get(open_id)
         # 有效追问来源：analyze / research / quote / compare / followup
-        valid_actions = {"analyze", "analysis", "research", "quote", "compare", "followup", "analyze_multi"}
+        valid_actions = {"analyze", "analysis", "research", "quote", "compare", "followup", "analyze_multi", "sim_account"}
         if st.last_action not in valid_actions:
             return {"resolved": False, "reason": "上一轮非分析任务"}
         if not st.last_symbol and not st.last_symbols:

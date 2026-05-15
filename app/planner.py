@@ -7,7 +7,7 @@
 
 关键改变：
 - 纯研报请求直接路由为 research，不要求标的与周期
-- 追问请求先通过 followup_resolver 定位上一轮对象
+- 追问请求先通过 intent_followup 定位上一轮对象
 """
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from app.feishu_asset_catalog import (
     get_catalog_for_repo,
     normalize_provider,
 )
-from app.followup_resolver import (
+from app.intent_detectors import (
+    looks_like_followup,
     resolve_followup_target,
-    _looks_like_followup,
 )
 from app.session_state import SessionState
 from tools.llm.client import LLMClientError, decide_feishu_route
@@ -73,6 +73,19 @@ class AgentRoutingError(Exception):
 def _repo_root() -> Any:
     from pathlib import Path
     return Path(__file__).resolve().parents[1]
+
+
+def _router_conversation_context(session_state: SessionState | None) -> dict[str, Any] | None:
+    if session_state is None:
+        return None
+    return {
+        "last_action": session_state.last_action,
+        "last_task_type": session_state.last_task_type,
+        "last_symbols": list(session_state.last_symbols or []),
+        "last_display_preferences": dict(session_state.last_display_preferences or {}),
+        "last_sim_account_scope": session_state.last_sim_account_scope,
+        "history_version": session_state.history_version,
+    }
 
 
 def _feishu_asset_catalog() -> FeishuAssetCatalog:
@@ -152,10 +165,6 @@ _RESEARCH_PAT = re.compile(
     r"(研报|机构|卖方|首席|观点|怎么看\s*待|配置逻辑|叙事|板块|概念|归属|行业|主题)",
     re.I,
 )
-_SIM_ACCOUNT_PAT = re.compile(
-    r"(余额|资金|账户|持仓|订单|成交|仓位|模拟\s*账户|可用|保证金|盈亏|权益|挂单|纸单|入金|提金|调账|资金额度|账户状态|进行中|活跃|未平仓|position|balance|account|deposit)",
-    re.I,
-)
 
 
 def infer_task_type_from_text(
@@ -170,9 +179,6 @@ def infer_task_type_from_text(
 
     if legacy_action == "chat":
         return "chat"
-
-    if _SIM_ACCOUNT_PAT.search(raw) and not _ANALYSIS_PAT.search(raw):
-        return "sim_account"
 
     if legacy_action == "followup":
         return "followup"
@@ -286,7 +292,7 @@ def plan_user_message(
 
     顺序：
     1. 会话状态：先确认追问对象
-    2. 本地 RAG：找到结构化事实（由 agent_facade 执行）
+    2. 本地 RAG：找到结构化事实（由 agent_graph 执行）
     3. 飞书历史：补齐语境（recent_messages）
     4. 显式澄清：若无法回答，返回非空澄清
     """
@@ -326,7 +332,7 @@ def plan_user_message(
         )
 
     # 1. 追问检测：优先从会话状态定位
-    if session_state and _looks_like_followup(raw):
+    if session_state and looks_like_followup(raw):
         followup_result = resolve_followup_target(raw, session_state)
         if followup_result.get("resolved"):
             tt = "followup"
@@ -351,25 +357,7 @@ def plan_user_message(
             }
         # 追问但无法定位 → 让它回落到下方的 LLM 进行意图分析发现
 
-    # 2. 模拟账户意图优先检测
-    if _SIM_ACCOUNT_PAT.search(raw) and not _ANALYSIS_PAT.search(raw):
-        tt = "sim_account"
-        return {
-            "action": "sim_account",
-            "task_type": tt,
-            "response_mode": plan_response_mode(tt),
-            "task_plan": build_task_plan(
-                task_type=tt,
-                response_mode=plan_response_mode(tt),
-                text=raw,
-                symbols=[],
-                interval=base_interval,
-                provider=base_provider,
-                with_research=False,
-                research_keyword=None,
-                question=raw,
-            ),
-        }
+    # 2. 模拟账户：已由 agent_core 的 intent_detectors + 统一图承接；此处不再正则截流。
 
     # 3. 纯研报请求：不要求标的与周期
     if _looks_like_research_only_request(raw):
@@ -409,6 +397,7 @@ def plan_user_message(
         default_interval=base_interval,
         recent_messages=recent_messages,
         tradable_assets=catalog.tradable_assets_for_prompt(),
+        conversation_context=_router_conversation_context(session_state),
     )
     extra_route_fields = _route_plan_steps(routed)
 

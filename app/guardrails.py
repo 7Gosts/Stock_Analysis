@@ -14,7 +14,7 @@ FORBIDDEN_CLAIMS = (
     "交易所逐笔资金流",
 )
 
-LIGHTWEIGHT_TASK_TYPES = frozenset({"quote", "compare", "research"})
+LIGHTWEIGHT_TASK_TYPES = frozenset({"quote", "compare", "research", "sim_account"})
 
 
 def validate_facts_bundle(facts_bundle: dict[str, Any], *, check_paths: bool = False) -> list[str]:

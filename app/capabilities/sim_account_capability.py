@@ -108,6 +108,11 @@ def _query_overview(common_params: dict[str, Any]) -> CapabilityResult:
     for r in sub_results:
         combined_tables.extend(r.tables)
 
+    display_prefs: dict[str, Any] = {}
+    for r in sub_results:
+        if r.default_display_prefs:
+            display_prefs.update(r.default_display_prefs)
+
     return CapabilityResult(
         domain="sim_account",
         intent="overview",
@@ -116,6 +121,7 @@ def _query_overview(common_params: dict[str, Any]) -> CapabilityResult:
         metrics=combined_metrics,
         evidence_sources=combined_sources,
         meta={"sub_queries": [q[0] for q in _OVERVIEW_QUERIES]},
+        default_display_prefs=display_prefs or None,
     )
 
 

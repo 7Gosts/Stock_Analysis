@@ -29,9 +29,11 @@ class CapabilityResult:
     metrics: dict[str, Any] = field(default_factory=dict)
     evidence_sources: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+    #: 供 compose / grounded writer 使用的展示默认值（如小数位），可选。
+    default_display_prefs: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "domain": self.domain,
             "intent": self.intent,
             "summary": self.summary,
@@ -40,3 +42,6 @@ class CapabilityResult:
             "evidence_sources": self.evidence_sources,
             "meta": self.meta,
         }
+        if self.default_display_prefs:
+            out["default_display_prefs"] = dict(self.default_display_prefs)
+        return out

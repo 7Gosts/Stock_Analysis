@@ -98,13 +98,14 @@ DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路
 优先调用提供的工具之一完成意图；不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。
 闲聊、致谢或引导用户发起行情分析时，请使用 reply_chat：message 可写多段完整中文，可简要归类列出用户 JSON 里 tradable_assets 相关标的与示例问法（不必抄全表名，分类说明即可）。
 若模型接口未返回 tool_calls、仅在 assistant 正文中输出内容，后端也会把正文交给用户；但仍应优先用 reply_chat(message=...) 一次性给出可读回复。
-用户消息 JSON 中含 tradable_assets（来自 market_config）、default_symbol、default_interval、short_term_interval_default。
-行情分析必须调用 analyze_market：symbols 只能从 tradable_assets 里的 symbol 选取；单标的也必须传长度为 1 的 symbols 列表，不要传 symbol 单数字段。
+用户消息 JSON 顶层字段：user_message（最新一句）、conversation_transcript（最近若干轮 user/assistant 文本）、
+conversation_context（结构化线索：last_task_type、last_symbols 等，非价格事实源）、
+policy_injection（内含 tradable_assets、default_symbol、default_interval、short_term_interval_default）。
+行情分析必须调用 analyze_market：symbols 只能从 policy_injection.tradable_assets 里的 symbol 选取；单标的也必须传长度为 1 的 symbols 列表，不要传 symbol 单数字段。
 如用户问题涉及"查研报""查板块""查归属""查概念""查主题"或类似表达，优先调用 search_research 或 query_concept_board 工具（如仅有关键词可只填 keyword，若有 symbol 可一并填写）。
 如用户问题涉及"余额""资金""账户""持仓""订单""成交""仓位""模拟账户"或类似表达，优先调用 view_sim_account 工具。scope 默认 overview（综合），用户明确只问持仓/订单/成交等时可指定 scope。
 如用户问题同时涉及行情分析与研报/板块/归属检索，需分别调用 analyze_market 与 search_research/query_concept_board，并分栏输出。
 不得将研报检索或板块归属混入行情分析主流程。
-口语里 eth/btc/sol 等须映射为表中存在的代码（如 *_USDT）。
 interval 仅 15m/30m/1h/4h/1d；用户说短线且未写具体周期时用 short_term_interval_default。
 provider 须与所选标的在 tradable_assets 中的 provider 一致。
 with_research：用户明确要看研报/机构观点时为 true。
@@ -467,6 +468,7 @@ def _build_feishu_route_payload(
     default_interval: str,
     recent_messages: list[dict[str, str]] | None,
     tradable_assets: list[dict[str, Any]] | None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     prompt_cfg = _feishu_router_prompt_cfg()
     system_prompt = str(prompt_cfg.get("llm_router_system_prompt") or "").strip()
@@ -474,13 +476,17 @@ def _build_feishu_route_payload(
         system_prompt = DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT
     temperature = _resolved_temperature(float(prompt_cfg.get("llm_router_temperature") or 0.0))
     short_iv = _feishu_short_term_interval()
+    transcript = list(recent_messages or [])[-20:]
     prompt_obj: dict[str, Any] = {
-        "text": text or "",
-        "default_symbol": default_symbol,
-        "default_interval": default_interval,
-        "recent_messages": recent_messages or [],
-        "short_term_interval_default": short_iv,
-        "tradable_assets": list(tradable_assets or []),
+        "user_message": text or "",
+        "conversation_transcript": transcript,
+        "conversation_context": dict(conversation_context or {}),
+        "policy_injection": {
+            "default_symbol": default_symbol,
+            "default_interval": default_interval,
+            "short_term_interval_default": short_iv,
+            "tradable_assets": list(tradable_assets or []),
+        },
     }
     url = f"{_base_url()}/chat/completions"
     system_with_hint = system_prompt + _feishu_router_interval_instruction(short_iv=short_iv)
@@ -521,7 +527,8 @@ def decide_feishu_route(
     default_interval: str,
     recent_messages: list[dict[str, str]] | None = None,
     tradable_assets: list[dict[str, Any]] | None = None,
-    timeout_sec: float = 12.0,
+    conversation_context: dict[str, Any] | None = None,
+    timeout_sec: float = 30.0,
 ) -> dict[str, Any]:
     """飞书路由：OpenAI-compatible chat/completions + tools；优先 tool_calls；无 tool_calls 时若有 assistant 正文则视为闲聊（action=chat）。
 
@@ -533,6 +540,7 @@ def decide_feishu_route(
         default_interval=default_interval,
         recent_messages=recent_messages,
         tradable_assets=tradable_assets,
+        conversation_context=conversation_context,
     )
     res = _post_json(url, payload, timeout_sec=timeout_sec)
     return _feishu_completion_response_to_route(res)
@@ -545,7 +553,7 @@ def feishu_route_deepseek_raw_and_routed(
     default_interval: str,
     recent_messages: list[dict[str, str]] | None = None,
     tradable_assets: list[dict[str, Any]] | None = None,
-    timeout_sec: float = 12.0,
+    timeout_sec: float = 30.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """真实调用 LLM：返回 (chat/completions 完整 JSON, 路由解析 dict)。供调试脚本打印原始响应。
 
@@ -557,6 +565,7 @@ def feishu_route_deepseek_raw_and_routed(
         default_interval=default_interval,
         recent_messages=recent_messages,
         tradable_assets=tradable_assets,
+        conversation_context=None,
     )
     res = _post_json(url, payload, timeout_sec=timeout_sec)
     return res, _feishu_completion_response_to_route(res)
@@ -607,10 +616,10 @@ def generate_decision(
     }
     url = f"{_base_url()}/chat/completions"
     try:
-        res = _post_json(url, {**base_payload, "response_format": {"type": "json_object"}})
+        res = _post_json(url, {**base_payload, "response_format": {"type": "json_object"}}, timeout_sec=120.0)
     except LLMClientError as err:
         if "HTTP 400" in str(err):
-            res = _post_json(url, base_payload)
+            res = _post_json(url, base_payload, timeout_sec=120.0)
         else:
             raise
     try:
@@ -644,7 +653,7 @@ def generate_feishu_narrative(
     *,
     facts: dict[str, Any],
     user_question: str | None = None,
-    timeout_sec: float = 60.0,
+    timeout_sec: float = 120.0,
 ) -> str:
     """基于工具锁事实生成飞书可读长文；不负责拉行情。"""
     cfg = get_analysis_config()
@@ -678,6 +687,20 @@ def generate_feishu_narrative(
     return text
 
 
+def _format_display_preferences_hint(dp: dict[str, Any]) -> str:
+    parts: list[str] = []
+    p = dp.get("precision")
+    if isinstance(p, int) and p >= 0:
+        parts.append(f"数值展示：金额与数量统一保留 {p} 位小数（四舍五入），以可读为先。")
+    if dp.get("compact"):
+        parts.append("篇幅：尽量简短，列表式要点即可。")
+    if dp.get("detailed"):
+        parts.append("篇幅：可适当展开说明，仍不得编造未提供的数据。")
+    if dp.get("repeat"):
+        parts.append("用户要求重复上一轮要点：在事实不变前提下简要复述。")
+    return "\n".join(parts)
+
+
 GROUNDED_WRITER_SYSTEM_BY_MODE: dict[str, str] = {
     "quick": (
         "你是金融简报撰稿人。用户 JSON 内含 task_type、response_mode 与 facts_bundle。\n"
@@ -706,6 +729,14 @@ GROUNDED_WRITER_SYSTEM_BY_MODE: dict[str, str] = {
         "文末免责声明：仅供技术分析与程序化演示，不构成投资建议。\n"
         "输出纯中文正文。"
     ),
+    "sim_account": (
+        "你是模拟账户数据播报员。facts_bundle.sim_account_facts 为程序查询结果（含 metrics/tables/summary），"
+        "只使用其中已出现的数字与账户字段；禁止编造成交回报、主力资金、交易所逐笔资金流。\n"
+        "将余额、持仓、委托、成交等信息用自然中文分段说明；勿输出英文键名或 JSON。\n"
+        "若用户要求小数位数或简短/详细，严格按 user JSON 中的 display_preferences 执行。\n"
+        "文末免责声明：仅供技术分析与程序化演示，不构成投资建议。\n"
+        "输出纯中文正文。"
+    ),
 }
 
 
@@ -715,7 +746,8 @@ def generate_grounded_answer(
     user_question: str | None,
     task_type: str,
     response_mode: str,
-    timeout_sec: float = 60.0,
+    display_preferences: dict[str, Any] | None = None,
+    timeout_sec: float = 120.0,
 ) -> dict[str, Any]:
     """基于 facts_bundle 的 grounded 撰稿；返回 text/sections/style。"""
     cfg = get_analysis_config()
@@ -725,7 +757,10 @@ def generate_grounded_answer(
     custom = str(agent.get("writer_system_prompt") or "").strip()
     mode_key = str(response_mode or "analysis").strip().lower()
     if mode_key not in GROUNDED_WRITER_SYSTEM_BY_MODE:
-        mode_key = "analysis"
+        if str(task_type or "").strip().lower() == "sim_account":
+            mode_key = "sim_account"
+        else:
+            mode_key = "analysis"
     system_prompt = custom if custom else GROUNDED_WRITER_SYSTEM_BY_MODE[mode_key]
     model = str(agent.get("writer_model") or "").strip() or _model_name()
     user_obj: dict[str, Any] = {
@@ -733,6 +768,11 @@ def generate_grounded_answer(
         "response_mode": response_mode,
         "facts_bundle": facts_bundle,
     }
+    if display_preferences and isinstance(display_preferences, dict) and display_preferences:
+        user_obj["display_preferences"] = display_preferences
+        dp_hint = _format_display_preferences_hint(display_preferences)
+        if dp_hint:
+            system_prompt = system_prompt + "\n\n" + dp_hint
     if user_question and str(user_question).strip():
         user_obj["user_question"] = str(user_question).strip()
     url = f"{_base_url()}/chat/completions"

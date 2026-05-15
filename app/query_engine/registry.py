@@ -72,8 +72,7 @@ def _fmt_latest_balances(rows: list[dict[str, Any]], params: dict[str, Any]) -> 
             "snapshot_time": str(r.get("snapshot_time", "")),
             "reason": r.get("reason", ""),
         }
-    lines = [f"{aid}: 余额 {m['balance']}, 可用 {m['available']}, 权益 {m['equity']}" for aid, m in metrics.items()]
-    summary = "账户余额：\n" + "\n".join(lines)
+    summary = "账户余额已汇总（详见 metrics / tables）。"
     return CapabilityResult(
         domain="sim_account", intent="overview",
         summary=summary, tables=rows, metrics=metrics,
@@ -89,8 +88,7 @@ def _fmt_open_positions(rows: list[dict[str, Any]], params: dict[str, Any]) -> C
             metrics={"open_positions": 0},
         )
     metrics = {"open_positions": len(rows)}
-    lines = [f"{r.get('symbol', '?')} qty={r.get('qty', 0)} entry={r.get('entry_price', 0)} uPnL={r.get('unrealized_pnl', 0)}" for r in rows]
-    summary = f"未平仓持仓 {len(rows)} 笔：\n" + "\n".join(lines)
+    summary = f"未平仓持仓 {len(rows)} 笔（明细见 tables）。"
     return CapabilityResult(
         domain="sim_account", intent="positions",
         summary=summary, tables=rows, metrics=metrics,
@@ -110,8 +108,7 @@ def _fmt_active_ideas(rows: list[dict[str, Any]], params: dict[str, Any]) -> Cap
         s = r.get("status", "?")
         by_status[s] = by_status.get(s, 0) + 1
     metrics = {"active_ideas": len(rows), "by_status": by_status}
-    lines = [f"[{r.get('status', '?')}] {r.get('symbol', '?')} {r.get('direction', '?')} idea={r.get('idea_id', '?')}" for r in rows]
-    summary = f"活动想法 {len(rows)} 条（{by_status}）：\n" + "\n".join(lines)
+    summary = f"活动想法 {len(rows)} 条（明细见 tables）。"
     return CapabilityResult(
         domain="sim_account", intent="active_ideas",
         summary=summary, tables=rows, metrics=metrics,
@@ -127,8 +124,7 @@ def _fmt_recent_orders(rows: list[dict[str, Any]], params: dict[str, Any]) -> Ca
             metrics={"total_orders": 0},
         )
     metrics = {"total_orders": len(rows)}
-    lines = [f"{r.get('symbol', '?')} {r.get('side', '?')} status={r.get('status', '?')} qty={r.get('requested_qty', 0)}" for r in rows]
-    summary = f"最近 {len(rows)} 条委托：\n" + "\n".join(lines)
+    summary = f"最近 {len(rows)} 条委托（明细见 tables）。"
     return CapabilityResult(
         domain="sim_account", intent="orders",
         summary=summary, tables=rows, metrics=metrics,
@@ -144,8 +140,7 @@ def _fmt_recent_fills(rows: list[dict[str, Any]], params: dict[str, Any]) -> Cap
             metrics={"total_fills": 0},
         )
     metrics = {"total_fills": len(rows)}
-    lines = [f"{r.get('symbol', '?')} {r.get('side', '?')} qty={r.get('fill_qty', 0)} price={r.get('fill_price', 0)}" for r in rows]
-    summary = f"最近 {len(rows)} 笔成交：\n" + "\n".join(lines)
+    summary = f"最近 {len(rows)} 笔成交（明细见 tables）。"
     return CapabilityResult(
         domain="sim_account", intent="fills",
         summary=summary, tables=rows, metrics=metrics,
@@ -168,13 +163,7 @@ def _fmt_order_health(rows: list[dict[str, Any]], params: dict[str, Any]) -> Cap
         "active_ideas": r.get("active_ideas", 0),
         "open_positions": r.get("open_positions", 0),
     }
-    summary = (
-        f"对账状态：pending_orders={metrics['pending_orders']}, "
-        f"filled_orders={metrics['filled_orders']}, "
-        f"total_fills={metrics['total_fills']}, "
-        f"active_ideas={metrics['active_ideas']}, "
-        f"open_positions={metrics['open_positions']}"
-    )
+    summary = "订单/成交对账指标已汇总（详见 metrics / tables）。"
     return CapabilityResult(
         domain="sim_account", intent="health",
         summary=summary, tables=rows, metrics=metrics,

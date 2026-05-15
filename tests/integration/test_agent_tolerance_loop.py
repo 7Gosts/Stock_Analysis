@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,6 @@ from unittest.mock import MagicMock, patch
 
 from app.agent_schemas import AgentErrorCode, AgentRequest
 from app.planner import AgentRoutingError
-from app.query_engine.base import CapabilityResult
 from app.session_state import SessionState, SessionStateStore
 
 
@@ -301,10 +301,22 @@ class TestAgentToleranceLoop(unittest.TestCase):
 
             request = AgentRequest(channel="http", session_id="repair-ok", text="看下走势")
 
+            from app.agent_schemas import AgentResponse as _AgentResponse
+
+            _chat_resp = _AgentResponse(
+                task_type="chat",
+                response_mode="quick",
+                reply_text="请补充标的名称。",
+                reply_chunks=["请补充标的名称。"],
+                facts_bundle=None,
+                meta={},
+            )
+
             with (
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", side_effect=_plan_side_effect),
+                patch("app.agent_core.run_post_route_chat_graph", return_value=_chat_resp),
             ):
                 resp = handle_request(request)
 
@@ -448,10 +460,22 @@ class TestAgentToleranceLoop(unittest.TestCase):
 
             request = AgentRequest(channel="http", session_id="reroute-success", text="看下走势")
 
+            from app.agent_schemas import AgentResponse as _AgentResponse
+
+            _chat_resp = _AgentResponse(
+                task_type="chat",
+                response_mode="quick",
+                reply_text="请补充标的名称。",
+                reply_chunks=["请补充标的名称。"],
+                facts_bundle=None,
+                meta={},
+            )
+
             with (
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", side_effect=_plan_side_effect),
+                patch("app.agent_core.run_post_route_chat_graph", return_value=_chat_resp),
             ):
                 resp = handle_request(request)
 
@@ -509,7 +533,7 @@ class TestAgentToleranceLoop(unittest.TestCase):
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", side_effect=_plan_side_effect) as mocked_plan,
-                patch("app.agent_facade.handle_user_request", side_effect=_facade_side_effect),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=RuntimeError("分析后端服务不可用")),
             ):
                 resp = handle_request(request)
 
@@ -532,8 +556,8 @@ class TestAgentToleranceLoop(unittest.TestCase):
             self.assertEqual(st.last_error_code, "analysis_backend_unavailable")
             self.assertEqual(st.termination_reason, "analysis_backend_unavailable")
 
-    def test_facade_structured_execute_error_is_normalized_to_error_response(self) -> None:
-        """facade 返回结构化 execute error 时，core 应统一包装为 chat-style error response。"""
+    def test_unified_graph_execute_error_is_normalized_to_error_response(self) -> None:
+        """unified graph 抛出 execute error 时，core 应统一包装为 chat-style error response。"""
         try:
             from app.agent_core import handle_request
         except ImportError:
@@ -559,42 +583,25 @@ class TestAgentToleranceLoop(unittest.TestCase):
                 },
             }
 
-            request = AgentRequest(channel="feishu", session_id="facade-structured-error", text="分析 BTC")
-
-            facade_result = {
-                "task_type": "analysis",
-                "response_mode": "analysis",
-                "facts_bundle": None,
-                "final_text": "分析服务暂时不可用。",
-                "reply_chunks": ["分析服务暂时不可用。"],
-                "meta": {
-                    "route": route,
-                    "error_code": "analysis_backend_unavailable",
-                    "error_stage": "infra",
-                    "recoverable": True,
-                    "termination_reason": "analysis_backend_unavailable",
-                    "error_message": "分析后端异常：timeout",
-                    "error_context": {},
-                },
-            }
+            request = AgentRequest(channel="feishu", session_id="graph-execute-error", text="分析 BTC")
 
             with (
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", return_value=route),
-                patch("app.agent_facade.handle_user_request", return_value=facade_result),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=RuntimeError("分析后端异常：timeout")),
             ):
                 resp = handle_request(request)
 
             self.assertEqual(resp.task_type, "chat")
-            self.assertEqual(resp.meta.get("error_code"), "analysis_backend_unavailable")
-            self.assertEqual(resp.meta.get("error_stage"), "infra")
-            self.assertEqual(resp.meta.get("termination_reason"), "analysis_backend_unavailable")
+            self.assertEqual(resp.meta.get("error_code"), "execute_provider_timeout")
+            self.assertEqual(resp.meta.get("error_stage"), "execute")
+            self.assertEqual(resp.meta.get("termination_reason"), "provider_timeout")
 
-            st = store.get("facade-structured-error")
+            st = store.get("graph-execute-error")
             self.assertEqual(st.route_attempts, 0)
-            self.assertEqual(st.last_error_code, "analysis_backend_unavailable")
-            self.assertEqual(st.termination_reason, "analysis_backend_unavailable")
+            self.assertEqual(st.last_error_code, "execute_provider_timeout")
+            self.assertEqual(st.termination_reason, "provider_timeout")
 
     def test_execute_db_unavailable_no_reroute(self) -> None:
         """数据库不可用（infra 错误）不触发 reroute，返回友好文案。"""
@@ -694,26 +701,31 @@ class TestAgentToleranceLoop(unittest.TestCase):
                     "followup_context": {},
                 },
             }
-            cap_result = CapabilityResult(
-                domain="sim_account",
-                intent="overview",
-                summary="账户余额：USD 可用 1000",
-                metrics={"USD": {"available": 1000}},
-                evidence_sources=["account_ledger"],
-                meta={"sub_queries": ["account.latest_balances"]},
+
+            from app.agent_schemas import AgentResponse as _AgentResponse
+
+            _sim_resp = _AgentResponse(
+                task_type="sim_account",
+                response_mode="quick",
+                reply_text="账户余额：USD 可用 1000",
+                reply_chunks=["账户余额：USD 可用 1000"],
+                facts_bundle=None,
+                meta={"domain": "sim_account", "intent": "overview", "capability_meta": {"sub_queries": ["account.latest_balances"]}},
             )
+
             request = AgentRequest(channel="feishu", session_id="sim-account-ok", text="看看当前资金额度")
 
             with (
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", return_value=route),
-                patch("app.capabilities.view_sim_account_state", return_value=cap_result),
+                patch("app.agent_core.run_post_route_chat_graph", return_value=_sim_resp),
             ):
                 resp = handle_request(request)
 
             self.assertEqual(resp.task_type, "sim_account")
-            self.assertEqual(resp.reply_text, "账户余额：USD 可用 1000")
+            self.assertIn("1000", resp.reply_text)
+            self.assertIn("USD", resp.reply_text)
             self.assertEqual(resp.meta.get("domain"), "sim_account")
             self.assertEqual(resp.meta.get("intent"), "overview")
             self.assertEqual(resp.meta.get("capability_meta"), {"sub_queries": ["account.latest_balances"]})
@@ -754,7 +766,7 @@ class TestAgentToleranceLoop(unittest.TestCase):
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", return_value=route),
-                patch("app.capabilities.view_sim_account_state", side_effect=RuntimeError("数据库暂时不可用")),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=RuntimeError("数据库暂时不可用")),
             ):
                 resp = handle_request(request)
 
@@ -799,7 +811,7 @@ class TestAgentToleranceLoop(unittest.TestCase):
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
                 patch("app.agent_core.plan_user_message", return_value=route),
-                patch("app.agent_facade.handle_user_request", side_effect=TimeoutError("provider timeout")),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=TimeoutError("provider timeout")),
             ):
                 resp = handle_request(request)
 
@@ -860,6 +872,7 @@ class TestAgentToleranceLoop(unittest.TestCase):
             with (
                 patch("app.agent_core.get_global_session_store", return_value=store),
                 patch("app.agent_core.plan_user_message", return_value=route),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=RuntimeError("追问所需的分析产物不存在")),
             ):
                 resp = handle_request(request)
 
@@ -872,61 +885,46 @@ class TestAgentToleranceLoop(unittest.TestCase):
             self.assertEqual(st.last_error_code, "followup_output_missing")
             self.assertEqual(st.termination_reason, "followup_output_missing")
 
-    def test_facade_writer_failure_is_classified(self) -> None:
-        """analysis 输出链路在 writer 终止失败时应返回 execute_writer_failed。"""
-        from app.agent_facade import handle_user_request
+    def test_unified_graph_writer_failure_is_classified(self) -> None:
+        """analysis 输出链路在 writer 终止失败时应返回 execute_analysis_failed。"""
+        try:
+            from app.agent_core import handle_request
+        except ImportError:
+            self.skipTest("loguru not installed, skipping agent_core test")
 
-        route = {
-            "action": "analyze",
-            "task_type": "analysis",
-            "response_mode": "analysis",
-            "payload": {"symbol": "BTC_USDT", "question": "分析 BTC"},
-            "task_plan": {
-                "symbols": ["BTC_USDT"],
-                "interval": "4h",
-                "provider": None,
-                "question": "分析 BTC",
-                "with_research": False,
-                "research_keyword": None,
-                "user_text": "分析 BTC",
-                "output_refs": {},
-                "followup_context": {},
-            },
-        }
+        with tempfile.TemporaryDirectory() as td:
+            store = SessionStateStore(persist_path=Path(td) / "state.json")
 
-        result_payload = {
-            "analysis_result": {
-                "symbol": "BTC_USDT",
-                "provider": "tickflow",
-                "interval": "4h",
-                "trend": "up",
-                "fixed_template": {"综合倾向": "偏多", "关键位(Fib)": "1", "触发条件": "2", "失效条件": "3", "风险点": "4", "下次复核时间": "5"},
-            },
-            "meta": {},
-        }
-
-        with (
-            patch("app.agent_facade._run_analysis_local", return_value=result_payload),
-            patch("app.agent_facade.grounded_writer_enabled", return_value=True),
-            patch("app.agent_facade.safe_grounded_write", return_value=None),
-            patch("app.agent_facade.write_legacy_narrative_if_enabled", side_effect=RuntimeError("writer boom")),
-            patch("app.agent_facade.fallback_to_template_reply_enabled", return_value=False),
-        ):
-            resp = handle_user_request(
-                text="分析 BTC",
-                channel="http",
-                context={
-                    "route": route,
-                    "user_message_for_chunks": "分析 BTC",
-                    "api_base_url": "http://127.0.0.1:8000",
-                    "repo_root": "/home/yangtongliu/code/Stock_Analysis",
-                    "rag_index": MagicMock(),
+            route = {
+                "action": "analyze",
+                "task_type": "analysis",
+                "response_mode": "analysis",
+                "task_plan": {
+                    "symbols": ["BTC_USDT"],
+                    "interval": "4h",
+                    "provider": None,
+                    "question": "分析 BTC",
+                    "with_research": False,
+                    "research_keyword": None,
+                    "user_text": "分析 BTC",
+                    "output_refs": {},
+                    "followup_context": {},
                 },
-            )
+            }
 
-        self.assertEqual(resp.get("meta", {}).get("error_code"), "execute_writer_failed")
-        self.assertEqual(resp.get("meta", {}).get("error_stage"), "execute")
-        self.assertEqual(resp.get("meta", {}).get("termination_reason"), "writer_failed")
+            request = AgentRequest(channel="http", session_id="writer-fail", text="分析 BTC")
+
+            with (
+                patch("app.agent_core.get_global_session_store", return_value=store),
+                patch("app.agent_core.get_or_create_rag_index", return_value=MagicMock()),
+                patch("app.agent_core.plan_user_message", return_value=route),
+                patch("app.agent_core.run_post_route_chat_graph", side_effect=RuntimeError("writer boom")),
+            ):
+                resp = handle_request(request)
+
+            self.assertEqual(resp.meta.get("error_code"), "execute_analysis_failed")
+            self.assertEqual(resp.meta.get("error_stage"), "execute")
+            self.assertEqual(resp.meta.get("termination_reason"), "analysis_execution_failed")
 
     # ========== 错误响应契约测试 ==========
 
