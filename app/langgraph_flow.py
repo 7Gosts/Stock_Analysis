@@ -217,6 +217,7 @@ def _build_llm() -> ChatOpenAI:
     api_key = str(settings.get("api_key") or "").strip()
     base_url = str(settings.get("base_url") or "").strip()
     provider = str(settings.get("provider") or "deepseek").strip()
+    temperature = settings.get("temperature")
     if not bool(settings.get("openai_compatible", True)):
         raise RuntimeError(f"当前 LLM provider={provider} 未声明为 OpenAI-compatible，暂不支持通过 ChatOpenAI 接入。")
     if not api_key:
@@ -227,7 +228,7 @@ def _build_llm() -> ChatOpenAI:
         raise RuntimeError("缺少 LLM base_url（可通过 LLM_BASE_URL、<PROVIDER>_BASE_URL 或 YAML llm.providers.<provider>.base_url 配置）。")
     return ChatOpenAI(
         model=model,
-        temperature=0.2,
+        temperature=float(temperature) if temperature is not None else 0.2,
         api_key=api_key,
         base_url=base_url,
         extra_body={"thinking": {"type": "disabled"}},

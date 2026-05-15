@@ -20,25 +20,43 @@ _JSON_OBJECT_SYSTEM_SUFFIX = "\n\n(json: Your entire reply must be one JSON obje
 
 
 def _base_url() -> str:
-    settings = get_llm_runtime_settings("deepseek")
+    settings = get_llm_runtime_settings()
     url = str(settings.get("base_url") or "").strip()
-    return (url or "https://api.deepseek.com").rstrip("/")
+    if url:
+        return url.rstrip("/")
+    provider = str(settings.get("provider") or "deepseek").strip().lower()
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
+    raise LLMClientError("缺少 LLM base_url（可通过 LLM_BASE_URL、<PROVIDER>_BASE_URL 或 YAML llm.providers.<provider>.base_url 配置）。")
 
 
 def _model_name() -> str:
-    settings = get_llm_runtime_settings("deepseek")
+    settings = get_llm_runtime_settings()
     model = str(settings.get("model") or "").strip()
-    return model or "deepseek-v4-flash"
+    if model:
+        return model
+    provider = str(settings.get("provider") or "deepseek").strip().lower()
+    if provider == "deepseek":
+        return "deepseek-v4-flash"
+    raise LLMClientError("缺少 LLM model（可通过 LLM_MODEL、<PROVIDER>_MODEL 或 YAML llm.providers.<provider>.model 配置）。")
 
 
 def _api_key() -> str:
-    settings = get_llm_runtime_settings("deepseek")
+    settings = get_llm_runtime_settings()
     key = str(settings.get("api_key") or "").strip()
     if not key:
         raise LLMClientError(
-            "缺少 LLM API Key（环境变量 LLM_API_KEY / DEEPSEEK_API_KEY，或 config/analysis_defaults.yaml 的 llm.providers.deepseek.api_key）。"
+            "缺少 LLM API Key（可通过 LLM_API_KEY、<PROVIDER>_API_KEY 或 YAML llm.providers.<provider>.api_key 配置）。"
         )
     return key
+
+
+def _resolved_temperature(default: float) -> float:
+    settings = get_llm_runtime_settings()
+    provider_temperature = settings.get("temperature")
+    if provider_temperature is None:
+        return float(default)
+    return float(provider_temperature)
 
 
 def _feishu_router_prompt_cfg() -> dict[str, Any]:
@@ -454,7 +472,7 @@ def _build_feishu_route_payload(
     system_prompt = str(prompt_cfg.get("llm_router_system_prompt") or "").strip()
     if not system_prompt:
         system_prompt = DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT
-    temperature = float(prompt_cfg.get("llm_router_temperature") or 0.0)
+    temperature = _resolved_temperature(float(prompt_cfg.get("llm_router_temperature") or 0.0))
     short_iv = _feishu_short_term_interval()
     prompt_obj: dict[str, Any] = {
         "text": text or "",
@@ -507,7 +525,7 @@ def decide_feishu_route(
 ) -> dict[str, Any]:
     """飞书路由：OpenAI-compatible chat/completions + tools；优先 tool_calls；无 tool_calls 时若有 assistant 正文则视为闲聊（action=chat）。
 
-    注：当前默认 provider 是 deepseek，但模块命名与异常已 provider-agnostic。
+    注：实际调用 provider 由 runtime config 的 llm.default_provider 决定。
     """
     url, payload = _build_feishu_route_payload(
         text=text,
@@ -574,7 +592,7 @@ def generate_decision(
     base_payload: dict[str, Any] = {
         "model": _model_name(),
         "thinking": {"type": "disabled"},
-        "temperature": float(temperature),
+        "temperature": _resolved_temperature(float(temperature)),
         "messages": [
             {
                 "role": "system",
@@ -631,7 +649,7 @@ def generate_feishu_narrative(
     """基于工具锁事实生成飞书可读长文；不负责拉行情。"""
     cfg = get_analysis_config()
     fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
-    temperature = float(fei.get("narrative_temperature", 0.35))
+    temperature = _resolved_temperature(float(fei.get("narrative_temperature", 0.35)))
     custom = str(fei.get("narrative_system_prompt") or "").strip()
     system_prompt = custom if custom else DEFAULT_FEISHU_NARRATIVE_SYSTEM
     user_obj: dict[str, Any] = {"facts": facts}
@@ -703,7 +721,7 @@ def generate_grounded_answer(
     cfg = get_analysis_config()
     agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
-    temperature = float(agent.get("writer_temperature", fei.get("narrative_temperature", 0.35)))
+    temperature = _resolved_temperature(float(agent.get("writer_temperature", fei.get("narrative_temperature", 0.35))))
     custom = str(agent.get("writer_system_prompt") or "").strip()
     mode_key = str(response_mode or "analysis").strip().lower()
     if mode_key not in GROUNDED_WRITER_SYSTEM_BY_MODE:

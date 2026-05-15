@@ -91,6 +91,17 @@ def get_llm_runtime_settings(provider: str | None = None) -> dict[str, Any]:
         or os.getenv(f"{env_prefix}_API_KEY", "").strip()
         or str(node.get("api_key") or "").strip()
     )
+    raw_temperature: Any = (
+        os.getenv("LLM_TEMPERATURE", "").strip()
+        or os.getenv(f"{env_prefix}_TEMPERATURE", "").strip()
+        or node.get("temperature")
+    )
+    temperature: float | None = None
+    if raw_temperature not in (None, ""):
+        try:
+            temperature = float(raw_temperature)
+        except (TypeError, ValueError):
+            temperature = None
 
     return {
         "provider": provider_name,
@@ -98,6 +109,7 @@ def get_llm_runtime_settings(provider: str | None = None) -> dict[str, Any]:
         "model": model,
         "base_url": base_url,
         "api_key": api_key,
+        "temperature": temperature,
         "openai_compatible": bool(node.get("openai_compatible", True)),
     }
 
