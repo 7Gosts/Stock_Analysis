@@ -59,6 +59,7 @@ def load_feishu_settings() -> dict[str, str]:
     """
     cfg = get_analysis_config()
     node = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
+    agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     memory_node = node.get("memory") if isinstance(node.get("memory"), dict) else {}
 
     app_id = str(node.get("app_id") or "").strip()
@@ -69,7 +70,11 @@ def load_feishu_settings() -> dict[str, str]:
     default_symbol = "BTC_USDT"
     default_interval = "4h"
 
-    llm_memory_rounds = _to_int(node.get("llm_memory_rounds"), default=_DEFAULT_MEMORY_ROUNDS, minimum=0, maximum=12)
+    if isinstance(agent, dict) and "router_context_rounds" in agent:
+        rounds_src = agent.get("router_context_rounds")
+    else:
+        rounds_src = node.get("llm_memory_rounds")
+    llm_memory_rounds = _to_int(rounds_src, default=_DEFAULT_MEMORY_ROUNDS, minimum=0, maximum=12)
     memory_enabled = _to_bool(memory_node.get("enabled"), default=True)
     memory_backend = str(memory_node.get("backend") or "jsonl").strip().lower() or "jsonl"
     memory_file = str(memory_node.get("memory_file") or "output/feishu_memory.jsonl").strip()

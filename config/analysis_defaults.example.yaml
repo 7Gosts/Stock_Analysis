@@ -74,7 +74,7 @@ llm:
       openai_compatible: true
       api_key: "替换为你自己的api key"
 
-# 飞书机器人（模板）
+# 飞书机器人（模板）：仅凭证与对话记忆；LLM 路由/撰稿调参见 agent 段（旧 feishu.llm_* / narrative_* 仍兼容）。
 # 注：default_symbol / default_interval / short_term_interval 已迁移到 runtime route context，
 # 由 session_state + market_config + router_policy 常量在运行时决定，不再作为配置字段。
 feishu:
@@ -87,21 +87,18 @@ feishu:
     max_messages_per_user: 2000
     history_days: 30
     long_term_top_k: 3
-  llm_memory_rounds: 4 # 传给路由模型的最近对话轮数（1轮=用户+机器人）
-  # 路由仍走 tools/llm/client.py 的 tool-calling 客户端（provider-agnostic）；当前默认使用 llm.providers.deepseek，勿要求模型输出裸 JSON。留空则用代码内默认。
-  llm_router_system_prompt: ""
-  llm_router_temperature: 0.0
-  # 为 true 时，飞书回复会调用当前 grounded/narrative writer 生成口语化长文；默认模型仍来自 llm.providers.deepseek。失败则回退固定模板。也可用环境变量 FEISHU_USE_NARRATIVE_REPLY=1
-  use_narrative_reply: false
-  narrative_temperature: 0.35
-  # 可选：覆盖默认叙事 system 提示；留空则用 tools/llm/client.py 内建默认提示
-  narrative_system_prompt: ""
 
 agent:
+  # 意图路由 LLM（planner；与渠道无关）。路由仍走 tools/llm/client.py tool-calling，勿要求模型输出裸 JSON。
+  router_context_rounds: 4 # 取最近对话轮数供路由（1 轮=用户+助手）；留空默认 4
+  router_system_prompt: "" # 留空用 client 内建 DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT
+  router_temperature: 0.0
   enable_grounded_writer: true
   writer_model: ""
   writer_temperature: 0.3
   writer_system_prompt: ""
+  # 仅兼容旧接口 generate_feishu_narrative；日常撰稿用 writer_* 与 enable_grounded_writer
+  legacy_narrative_system_prompt: ""
   enable_quote_mode: true
   enable_compare_mode: true
   enable_research_mode: true

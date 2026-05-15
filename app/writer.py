@@ -18,6 +18,7 @@ def grounded_writer_enabled() -> bool:
     agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     if "enable_grounded_writer" in agent:
         return bool(agent.get("enable_grounded_writer"))
+    # 兼容旧配置：feishu.use_narrative_reply（已迁主开关至 agent.enable_grounded_writer）
     fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
     if fei.get("use_narrative_reply"):
         return True

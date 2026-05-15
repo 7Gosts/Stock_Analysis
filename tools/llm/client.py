@@ -59,10 +59,20 @@ def _resolved_temperature(default: float) -> float:
     return float(provider_temperature)
 
 
-def _feishu_router_prompt_cfg() -> dict[str, Any]:
+def _intent_router_prompt_cfg() -> dict[str, Any]:
+    """意图路由 LLM 的 system / temperature（优先 agent，兼容旧 feishu.*）。"""
     cfg = get_analysis_config()
-    node = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
-    return node if isinstance(node, dict) else {}
+    agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
+    if isinstance(agent, dict) and str(agent.get("router_system_prompt") or "").strip():
+        system_prompt = str(agent.get("router_system_prompt")).strip()
+    else:
+        system_prompt = str(fei.get("llm_router_system_prompt") or "").strip()
+    if isinstance(agent, dict) and "router_temperature" in agent:
+        temperature = float(agent.get("router_temperature") or 0.0)
+    else:
+        temperature = float(fei.get("llm_router_temperature") or 0.0)
+    return {"llm_router_system_prompt": system_prompt, "llm_router_temperature": temperature}
 
 
 # Router policy 常量（不再从 YAML 配置读取）
@@ -93,7 +103,7 @@ def _feishu_router_interval_instruction(*, short_iv: str) -> str:
     )
 
 
-# 未配置 feishu.llm_router_system_prompt 时使用；以 tools 为主，无 tool_calls 时见 decide_feishu_route 对 assistant 正文的兜底。
+# 未配置 agent.router_system_prompt（或兼容旧 feishu.llm_router_system_prompt）时使用；以 tools 为主，无 tool_calls 时见 decide_feishu_route 对 assistant 正文的兜底。
 DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报/板块/归属/概念检索；模拟账户余额/持仓/订单/成交查看）。
 优先调用提供的工具之一完成意图；不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。
 闲聊、致谢或引导用户发起行情分析时，请使用 reply_chat：message 可写多段完整中文，可简要归类列出用户 JSON 里 tradable_assets 相关标的与示例问法（不必抄全表名，分类说明即可）。
@@ -470,7 +480,7 @@ def _build_feishu_route_payload(
     tradable_assets: list[dict[str, Any]] | None,
     conversation_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    prompt_cfg = _feishu_router_prompt_cfg()
+    prompt_cfg = _intent_router_prompt_cfg()
     system_prompt = str(prompt_cfg.get("llm_router_system_prompt") or "").strip()
     if not system_prompt:
         system_prompt = DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT
@@ -657,9 +667,13 @@ def generate_feishu_narrative(
 ) -> str:
     """基于工具锁事实生成飞书可读长文；不负责拉行情。"""
     cfg = get_analysis_config()
+    agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
-    temperature = _resolved_temperature(float(fei.get("narrative_temperature", 0.35)))
-    custom = str(fei.get("narrative_system_prompt") or "").strip()
+    wt = agent.get("writer_temperature", 0.35) if isinstance(agent, dict) else 0.35
+    if wt is None:
+        wt = float(fei.get("narrative_temperature", 0.35))
+    temperature = _resolved_temperature(float(wt))
+    custom = str(agent.get("legacy_narrative_system_prompt") or fei.get("narrative_system_prompt") or "").strip()
     system_prompt = custom if custom else DEFAULT_FEISHU_NARRATIVE_SYSTEM
     user_obj: dict[str, Any] = {"facts": facts}
     if user_question and str(user_question).strip():
@@ -753,7 +767,10 @@ def generate_grounded_answer(
     cfg = get_analysis_config()
     agent = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     fei = cfg.get("feishu") if isinstance(cfg.get("feishu"), dict) else {}
-    temperature = _resolved_temperature(float(agent.get("writer_temperature", fei.get("narrative_temperature", 0.35))))
+    wt = agent.get("writer_temperature", 0.35) if isinstance(agent, dict) else 0.35
+    if wt is None:
+        wt = float(fei.get("narrative_temperature", 0.35))
+    temperature = _resolved_temperature(float(wt))
     custom = str(agent.get("writer_system_prompt") or "").strip()
     mode_key = str(response_mode or "analysis").strip().lower()
     if mode_key not in GROUNDED_WRITER_SYSTEM_BY_MODE:
