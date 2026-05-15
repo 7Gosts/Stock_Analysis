@@ -4,10 +4,8 @@
 1. 识别 task_type
 2. 识别 action
 3. 生成最小 task plan
-4. 永不返回空 clarify_message
 
 关键改变：
-- 所有 clarify 分支必须返回非空消息（使用 default_clarify_message）
 - 纯研报请求直接路由为 research，不要求标的与周期
 - 追问请求先通过 followup_resolver 定位上一轮对象
 """
@@ -16,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Literal
-
+from app.agent_schemas import AgentErrorCode, AgentErrorStage, ERROR_CODE_DEFAULTS
 from app.feishu_asset_catalog import (
     FeishuAssetCatalog,
     canonical_tradable_symbol,
@@ -25,15 +23,51 @@ from app.feishu_asset_catalog import (
     normalize_provider,
 )
 from app.followup_resolver import (
-    default_clarify_message,
     resolve_followup_target,
     _looks_like_followup,
 )
 from app.session_state import SessionState
 from tools.llm.client import LLMClientError, decide_feishu_route
 
-TaskType = Literal["chat", "clarify", "quote", "compare", "analysis", "research", "followup"]
-ResponseMode = Literal["quick", "compare", "analysis", "narrative", "followup"]
+TaskType = Literal["chat", "quote", "compare", "analysis", "research", "followup", "sim_account"]
+ResponseMode = Literal["quick", "compare", "analysis", "narrative", "followup", "sim_account"]
+
+
+class AgentRoutingError(Exception):
+    """路由阶段的结构化错误异常。
+
+    携带错误码、阶段、可恢复性等信息，供 agent_core 捕获后填充到 AgentResponse.meta。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: AgentErrorCode,
+        recoverable: bool = True,
+        termination_reason: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        defaults = ERROR_CODE_DEFAULTS.get(code, {})
+        default_stage = defaults.get("stage", AgentErrorStage.route)
+        self.stage = default_stage if isinstance(default_stage, AgentErrorStage) else AgentErrorStage.route
+        self.recoverable = recoverable
+        self.termination_reason = termination_reason
+        self.context = context or {}
+
+    def to_agent_error(self) -> "app.agent_schemas.AgentError":
+        """转换为 AgentError 对象。"""
+        from app.agent_schemas import AgentError
+        return AgentError(
+            code=self.code,
+            stage=self.stage,
+            recoverable=self.recoverable,
+            message=str(self),
+            termination_reason=self.termination_reason,
+            context=self.context,
+        )
 
 
 def _repo_root() -> Any:
@@ -65,6 +99,42 @@ def _to_bool(value: Any, *, default: bool) -> bool:
     return default
 
 
+_EXPLICIT_INTERVAL_PAT = re.compile(
+    r"(?<!\w)(15m|30m|1h|4h|1d|1day)(?!\w)|15\s*分钟|30\s*分钟|1\s*小时|4\s*小时|四小时|日线|日k|日K|小时线|分钟线",
+    re.I,
+)
+
+
+def _has_explicit_interval(text: str) -> bool:
+    return bool(_EXPLICIT_INTERVAL_PAT.search((text or "").strip()))
+
+
+def _preferred_default_interval(symbol_upper: str, *, fallback_interval: str, catalog: FeishuAssetCatalog) -> str:
+    if catalog.provider_for(symbol_upper) == "goldapi":
+        return "1d"
+    return _normalize_interval(fallback_interval, "4h")
+
+
+def _resolve_analysis_interval(
+    *,
+    text: str,
+    routed_interval: str,
+    symbol_upper: str,
+    fallback_interval: str,
+    catalog: FeishuAssetCatalog,
+) -> str:
+    preferred_default = _preferred_default_interval(
+        symbol_upper,
+        fallback_interval=fallback_interval,
+        catalog=catalog,
+    )
+    if not symbol_upper:
+        return _normalize_interval(routed_interval, preferred_default)
+    if not _has_explicit_interval(text) and catalog.provider_for(symbol_upper) == "goldapi":
+        return preferred_default
+    return _normalize_interval(routed_interval, preferred_default)
+
+
 _QUOTE_PAT = re.compile(
     r"(现价|多少钱|什么价|价格多少|报价|最新价|当前价|点位多少|多少\s*钱|price\s*now|"
     r"how\s+much|当前\s*报价)",
@@ -82,6 +152,10 @@ _RESEARCH_PAT = re.compile(
     r"(研报|机构|卖方|首席|观点|怎么看\s*待|配置逻辑|叙事|板块|概念|归属|行业|主题)",
     re.I,
 )
+_SIM_ACCOUNT_PAT = re.compile(
+    r"(余额|资金|账户|持仓|订单|成交|仓位|模拟\s*账户|可用|保证金|盈亏|权益|挂单|纸单|入金|提金|调账|资金额度|账户状态|进行中|活跃|未平仓|position|balance|account|deposit)",
+    re.I,
+)
 
 
 def infer_task_type_from_text(
@@ -94,8 +168,11 @@ def infer_task_type_from_text(
     """语义规则细化任务类型。"""
     raw = (text or "").strip()
 
-    if legacy_action in {"chat", "clarify"}:
-        return legacy_action  # type: ignore[return-value]
+    if legacy_action == "chat":
+        return "chat"
+
+    if _SIM_ACCOUNT_PAT.search(raw) and not _ANALYSIS_PAT.search(raw):
+        return "sim_account"
 
     if legacy_action == "followup":
         return "followup"
@@ -118,7 +195,7 @@ def infer_task_type_from_text(
 
 
 def plan_response_mode(task_type: TaskType) -> ResponseMode:
-    if task_type in {"chat", "clarify", "quote"}:
+    if task_type in {"chat", "quote", "sim_account"}:
         return "quick"
     if task_type == "compare":
         return "compare"
@@ -156,6 +233,16 @@ def build_task_plan(
         "output_refs": dict(output_refs or {}),
         "followup_context": dict(followup_context or {}),
     }
+
+
+def _route_plan_steps(routed: dict[str, Any]) -> dict[str, Any]:
+    steps = routed.get("plan_steps")
+    if not isinstance(steps, list) or not steps:
+        return {}
+    normalized_steps = [dict(step) for step in steps if isinstance(step, dict)]
+    if not normalized_steps:
+        return {}
+    return {"plan_steps": normalized_steps}
 
 
 def _extract_research_keyword(text: str) -> str | None:
@@ -229,27 +316,14 @@ def plan_user_message(
     lp = str(ctx_provider or "").strip().lower()
     base_provider = lp if lp in {"tickflow", "gateio", "goldapi"} else None
 
-    # 空文本 → 返回非空澄清
+    # 空文本不做文案兜底，直接视为无效请求
     if not raw:
-        clarify_msg = "你想了解什么行情或者研报呢？可以告诉我股票代码或行业版块。"
-        tt: TaskType = "clarify"
-        return {
-            "action": "clarify",
-            "clarify_message": clarify_msg,
-            "task_type": tt,
-            "response_mode": plan_response_mode(tt),
-            "task_plan": build_task_plan(
-                task_type=tt,
-                response_mode=plan_response_mode(tt),
-                text=raw,
-                symbols=[],
-                interval=base_interval,
-                provider=base_provider,
-                with_research=False,
-                research_keyword=None,
-                question=clarify_msg,
-            ),
-        }
+        raise AgentRoutingError(
+            "empty user message",
+            code=AgentErrorCode.route_empty_message,
+            recoverable=False,
+            termination_reason="user_input_empty",
+        )
 
     # 1. 追问检测：优先从会话状态定位
     if session_state and _looks_like_followup(raw):
@@ -277,7 +351,27 @@ def plan_user_message(
             }
         # 追问但无法定位 → 让它回落到下方的 LLM 进行意图分析发现
 
-    # 2. 纯研报请求：不要求标的与周期
+    # 2. 模拟账户意图优先检测
+    if _SIM_ACCOUNT_PAT.search(raw) and not _ANALYSIS_PAT.search(raw):
+        tt = "sim_account"
+        return {
+            "action": "sim_account",
+            "task_type": tt,
+            "response_mode": plan_response_mode(tt),
+            "task_plan": build_task_plan(
+                task_type=tt,
+                response_mode=plan_response_mode(tt),
+                text=raw,
+                symbols=[],
+                interval=base_interval,
+                provider=base_provider,
+                with_research=False,
+                research_keyword=None,
+                question=raw,
+            ),
+        }
+
+    # 3. 纯研报请求：不要求标的与周期
     if _looks_like_research_only_request(raw):
         research_keyword = _extract_research_keyword(raw)
         tt: TaskType = "research"
@@ -309,79 +403,33 @@ def plan_user_message(
         }
 
     # 3. 调用 LLM 路由（常规分析请求）
-    try:
-        routed = decide_feishu_route(
-            text=raw,
-            default_symbol=base_symbol,
-            default_interval=base_interval,
-            recent_messages=recent_messages,
-            tradable_assets=catalog.tradable_assets_for_prompt(),
-        )
-    except (LLMClientError, Exception) as exc:
-        from loguru import logger
-        msg = str(exc).replace("\n", " ").strip()
-        logger.warning("[Planner] route_llm_error exc_type={} msg={}", type(exc).__name__, msg[:480])
-        clarify_msg = default_clarify_message({
-            "last_symbol": ctx_sym,
-            "last_interval": ctx_interval,
-        })
-        tt = "clarify"
-        return {
-            "action": "clarify",
-            "clarify_message": clarify_msg,
-            "task_type": tt,
-            "response_mode": plan_response_mode(tt),
-            "task_plan": build_task_plan(
-                task_type=tt,
-                response_mode=plan_response_mode(tt),
-                text=raw,
-                symbols=[],
-                interval=base_interval,
-                provider=base_provider,
-                with_research=False,
-                research_keyword=None,
-                question=clarify_msg,
-            ),
-        }
+    routed = decide_feishu_route(
+        text=raw,
+        default_symbol=base_symbol,
+        default_interval=base_interval,
+        recent_messages=recent_messages,
+        tradable_assets=catalog.tradable_assets_for_prompt(),
+    )
+    extra_route_fields = _route_plan_steps(routed)
 
     action = str(routed.get("action") or "").strip().lower()
 
-    # 4. clarify 分支：必须非空
-    if action == "clarify":
-        clarify_msg = str(routed.get("clarify_message") or "").strip()
-        if not clarify_msg:
-            clarify_msg = default_clarify_message({
-                "last_symbol": ctx_sym,
-                "last_interval": ctx_interval,
-            })
-        tt = "clarify"
-        return {
-            "action": "clarify",
-            "clarify_message": clarify_msg,
-            "task_type": tt,
-            "response_mode": plan_response_mode(tt),
-            "task_plan": build_task_plan(
-                task_type=tt,
-                response_mode=plan_response_mode(tt),
-                text=raw,
-                symbols=[],
-                interval=base_interval,
-                provider=base_provider,
-                with_research=False,
-                research_keyword=None,
-                question=clarify_msg,
-            ),
-        }
-
-    # 5. chat 分支
+    # 4. chat 分支
     if action == "chat":
         chat_reply = str(routed.get("chat_reply") or "").strip()
         if not chat_reply:
-            chat_reply = "收到，有什么我可以帮你分析的吗？"
+            raise AgentRoutingError(
+                "chat route missing chat_reply",
+                code=AgentErrorCode.route_missing_chat_reply,
+                recoverable=True,
+                termination_reason="llm_output_invalid",
+                context={"action": action},
+            )
         tt = "chat"
         return {
             "action": "chat",
             "chat_reply": chat_reply,
+            **extra_route_fields,
             "task_type": tt,
             "response_mode": plan_response_mode(tt),
             "task_plan": build_task_plan(
@@ -397,6 +445,33 @@ def plan_user_message(
             ),
         }
 
+    # 5. sim_account 分支
+    if action == "sim_account":
+        scope = str(routed.get("scope") or "overview").strip()
+        routed_account_id = str(routed.get("account_id") or "").strip()
+        routed_symbol = str(routed.get("symbol") or "").strip()
+        tt = "sim_account"
+        return {
+            "action": "sim_account",
+            "scope": scope,
+            "account_id": routed_account_id or None,
+            "symbol": routed_symbol or None,
+            **extra_route_fields,
+            "task_type": tt,
+            "response_mode": plan_response_mode(tt),
+            "task_plan": build_task_plan(
+                task_type=tt,
+                response_mode=plan_response_mode(tt),
+                text=raw,
+                symbols=[routed_symbol] if routed_symbol else [],
+                interval=base_interval,
+                provider=base_provider,
+                with_research=False,
+                research_keyword=None,
+                question=raw,
+            ),
+        }
+
     # 6. research / concept_board 分支
     if action in {"research", "concept_board"}:
         research_keyword = str(
@@ -407,6 +482,7 @@ def plan_user_message(
         tt = "research"
         return {
             "action": "analyze",
+            **extra_route_fields,
             "payload": {
                 "symbol": routed_symbol,
                 "provider": normalize_provider(routed.get("provider"), symbol_upper=routed_symbol, catalog=catalog),
@@ -440,51 +516,45 @@ def plan_user_message(
         with_research = _to_bool(routed.get("with_research"), default=False)
         global_kw = str(routed.get("research_keyword") or "").strip() or None
 
-        # 无有效标的 → 返回非空澄清
+        # 无有效标的不做文案兜底，视为非法路由输出
         if not routed_symbols:
-            clarify_msg = default_clarify_message({
-                "last_symbol": ctx_sym,
-                "last_interval": ctx_interval,
-            })
-            tt = "clarify"
-            return {
-                "action": "clarify",
-                "clarify_message": clarify_msg,
-                "task_type": tt,
-                "response_mode": plan_response_mode(tt),
-                "task_plan": build_task_plan(
-                    task_type=tt,
-                    response_mode=plan_response_mode(tt),
-                    text=raw,
-                    symbols=[],
-                    interval=base_interval,
-                    provider=base_provider,
-                    with_research=False,
-                    research_keyword=None,
-                    question=clarify_msg,
-                ),
-            }
+            raise AgentRoutingError(
+                "analyze route missing valid symbols",
+                code=AgentErrorCode.route_missing_symbols,
+                recoverable=True,
+                termination_reason="llm_output_invalid",
+                context={"action": action},
+            )
 
         # 多标的
         if len(routed_symbols) > 1:
             payloads: list[dict[str, Any]] = []
             for sym in routed_symbols:
+                interval_value = _resolve_analysis_interval(
+                    text=raw,
+                    routed_interval=routed_interval,
+                    symbol_upper=sym,
+                    fallback_interval=base_interval,
+                    catalog=catalog,
+                )
                 rk = (global_kw or catalog.research_keyword_for(sym) or None) if with_research else None
                 payloads.append({
                     "symbol": sym,
                     "provider": normalize_provider(routed.get("provider"), symbol_upper=sym, catalog=catalog),
-                    "interval": _normalize_interval(routed_interval, base_interval),
+                    "interval": interval_value,
                     "question": routed_question or raw,
                     "use_rag": True,
                     "use_llm_decision": True,
                     "with_research": with_research,
                     "research_keyword": rk,
                 })
+            plan_interval = payloads[0]["interval"] if payloads else _normalize_interval(routed_interval, base_interval)
             tt = infer_task_type_from_text(
                 raw, legacy_action="analyze_multi", symbol_count=len(routed_symbols), with_research=with_research
             )
             return {
                 "action": "analyze_multi",
+                **extra_route_fields,
                 "payloads": payloads,
                 "task_type": tt,
                 "response_mode": plan_response_mode(tt),
@@ -493,7 +563,7 @@ def plan_user_message(
                     response_mode=plan_response_mode(tt),
                     text=raw,
                     symbols=list(routed_symbols),
-                    interval=_normalize_interval(routed_interval, base_interval),
+                    interval=plan_interval,
                     provider=normalize_provider(routed.get("provider"), symbol_upper=routed_symbols[0], catalog=catalog),
                     with_research=with_research,
                     research_keyword=global_kw,
@@ -504,13 +574,20 @@ def plan_user_message(
         # 单标的
         single = routed_symbols[0]
         pv = normalize_provider(routed.get("provider"), symbol_upper=single, catalog=catalog)
-        iv = _normalize_interval(routed_interval, base_interval)
+        iv = _resolve_analysis_interval(
+            text=raw,
+            routed_interval=routed_interval,
+            symbol_upper=single,
+            fallback_interval=base_interval,
+            catalog=catalog,
+        )
         rk = (global_kw or catalog.research_keyword_for(single) or None) if with_research else None
         tt = infer_task_type_from_text(
             raw, legacy_action="analyze", symbol_count=1, with_research=with_research
         )
         return {
             "action": "analyze",
+            **extra_route_fields,
             "payload": {
                 "symbol": single,
                 "provider": pv,
@@ -536,29 +613,13 @@ def plan_user_message(
             ),
         }
 
-    # 8. 其他未知 action → 返回非空澄清
-    clarify_msg = default_clarify_message({
-        "last_symbol": ctx_sym,
-        "last_interval": ctx_interval,
-    })
-    tt = "clarify"
-    return {
-        "action": "clarify",
-        "clarify_message": clarify_msg,
-        "task_type": tt,
-        "response_mode": plan_response_mode(tt),
-        "task_plan": build_task_plan(
-            task_type=tt,
-            response_mode=plan_response_mode(tt),
-            text=raw,
-            symbols=[],
-            interval=base_interval,
-            provider=base_provider,
-            with_research=False,
-            research_keyword=None,
-            question=clarify_msg,
-        ),
-    }
+    raise AgentRoutingError(
+        f"unknown route action: {action or '<empty>'}",
+        code=AgentErrorCode.route_unknown_action,
+        recoverable=False,
+        termination_reason="invalid_route_output",
+        context={"action": action},
+    )
 
 
 def log_routed_preview(routed: dict[str, Any], *, logger_label: str = "[Planner]") -> None:
@@ -573,6 +634,7 @@ def log_routed_preview(routed: dict[str, Any], *, logger_label: str = "[Planner]
     keys = (
         "action",
         "task_type",
+        "plan_steps",
         "symbol",
         "symbols",
         "interval",
@@ -580,7 +642,6 @@ def log_routed_preview(routed: dict[str, Any], *, logger_label: str = "[Planner]
         "provider",
         "with_research",
         "research_keyword",
-        "clarify_message",
         "followup_context",
         "output_refs",
     )

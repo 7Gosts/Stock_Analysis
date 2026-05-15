@@ -20,13 +20,12 @@ from app.feishu_adapter import run_feishu_bot
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="飞书机器人：WebSocket 收消息并调用统一 Agent Core 回复。")
-    p.add_argument("--api-base-url", default="http://127.0.0.1:8000", help="分析 API 地址（可选，用于 HTTP 分析任务）")
     return p
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    run_feishu_bot(api_base_url=args.api_base_url)
+    _args = build_parser().parse_args()
+    run_feishu_bot()
     return 0
 
 

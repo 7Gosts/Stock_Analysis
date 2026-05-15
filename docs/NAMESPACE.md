@@ -55,6 +55,16 @@
 
 | 文件 | 职责 |
 |------|------|
+| `agent_core.py` | **统一 Agent Core 入口**：消费 AgentRequest -> planner 路由 -> 执行器 -> AgentResponse；记录容错状态（route_attempts、last_error_code、repair_history、termination_reason） |
+| `agent_schemas.py` | **统一请求/响应 Schema**：AgentRequest、AgentResponse、AgentError、AgentErrorCode、AgentErrorStage、ERROR_CODE_DEFAULTS；定义结构化错误模型 |
+| `planner.py` | **路由层**：只消费已标准化 route；输出统一协议（action=analyze 时内部统一使用 symbols=[]）；抛 AgentRoutingError 结构化错误 |
+| `agent_facade.py` | **执行层**：调用 agent_facade 执行分析/报价/比较/追问；聚合 facts_bundle；处理飞书适配 |
+| `session_state.py` | **会话状态层**：记录 last_symbols、route_attempts、last_error_code、repair_history、termination_reason；提供 record_error、record_success、record_final_termination、reset_route_attempts 方法 |
+| `memory_store.py` | **飞书历史层**：只存储飞书消息文本，不存储结构化状态；用于指代消解和风格延续（不作为事实源） |
+| `rag_index.py` | **本地 RAG 索引**：从 output/ 加载分析产物，提供 facts_for_followup、facts_for_research；作为事实主源 |
+| `followup_resolver.py` | **追问解析**：从 session_state 获取上一轮标的、周期、产物路径；辅助追问路由 |
+| `feishu_adapter.py` | **飞书入口适配**：收消息、去重、取历史、构造 AgentRequest、发送 AgentResponse；不承担路由或业务判断职责 |
+| `api_server.py` | **HTTP API 服务**：提供 HTTP 入口，调用 agent_core 处理请求 |
 | `orchestrator.py` | 主流程编排：选标的、拉主/辅周期、调分析引擎、组装 overview 与候选台账 |
 | `report_writer.py` | 报告与总览写入：同日 prepend、`ai_overview` 槽位合并、历史时间戳文件清理 |
 | `journal_service.py` | 台账服务：先更新旧条目再追加新候选（含 RR/质量门控）并刷新统计文件；调用 `persistence` 包写 PG |
@@ -82,6 +92,7 @@
 | `config/market_config.json` | 标的列表、`default_symbols`、`market` / `data_symbol`；含 `CRYPTO`（如 `BTC_USDT`）与可选 `tags` |
 | `config/analysis_defaults.yaml` | crypto 分析默认参数（MA 8/21/55、分形参数、RR 阈值等） |
 | `sql/` | 运行期 DML 片段（`journal/*.sql`、`account/ledger_append_snapshot.sql`）；只读查询样例见 `docs/SQL_AI_REFERENCE.md` |
+| `docs/UNIFIED_DATA_CAPABILITY_ARCHITECTURE.md` | Agent 统一数据能力层设计：把行情、研报、模拟账户收敛成同级 capability，并定义命名 SQL 查询层 |
 | `scripts/account_cash_move.py` | CLI：账户 `deposit` / `withdraw` / `adjust`（写 `account_ledger`） |
 | `tools/yanbaoke/scripts/search.mjs` | 研报客搜索（无 Key 可搜） |
 | `tools/yanbaoke/scripts/download.mjs` | 研报下载（需 Key） |
@@ -131,3 +142,203 @@ from intel.yanbaoke_client import write_research_bundle
 | `analysis_engine.py` | `kline_metrics.py` |
 | `data_providers.py` | `price_feeds.py` |
 | `trade_journal_stats.py` | `ledger_stats.py` |
+
+---
+
+## Route Contract 与容错闭环
+
+### action 与 task_type 两层概念（重要）
+
+**这是当前最容易混淆的点**：
+
+#### action（router 协议动作）
+
+action 是 LLM router 输出的协议动作，只有以下几种：
+
+| action | 含义 | 对应 LLM tool |
+|--------|------|---------------|
+| `analyze` | 行情分析请求 | `analyze_market` |
+| `chat` | 闲聊/寒暄/引导 | `reply_chat` |
+| `research` | 研报/机构观点检索 | `search_research` |
+| `concept_board` | 板块/概念/归属查询 | `query_concept_board` |
+| `followup` | 追问上一轮结果 | 会话状态推断（非 LLM tool） |
+
+**注意**：`quote`、`compare`、`analysis` 不是 action，是 task_type。
+
+#### task_type（业务语义分类）
+
+task_type 是 planner 根据用户文本语义 + symbol 数量推断的业务分类：
+
+| task_type | 含义 | 推断条件 |
+|-----------|------|----------|
+| `chat` | 闲聊 | action=chat |
+| `quote` | 快速报价 | action=analyze + 单标的 + 用户文本含"现价/多少钱"语义 |
+| `compare` | 多标的对比 | action=analyze + 多标的 + 用户文本含"谁更强/对比"语义 |
+| `analysis` | 技术分析 | action=analyze + 默认分类 |
+| `research` | 研报检索 | action=research 或 action=analyze + with_research=True + 研报语义 |
+| `followup` | 追问 | 会话状态推断 |
+
+**关键约束**：
+
+1. `quote / compare / analysis` 都是 `action=analyze` 的子类型，由 planner 根据语义推断。
+2. 不允许把 `quote / compare` 扩成新的 planner action。
+3. `research` 既可以是 action（纯研报请求），也可以是 task_type（研报语义推断）。
+
+### Route Contract（路由协议统一，已完成）
+
+**原则**：协议统一发生在边界层，不发生在业务消费层。
+
+LLM 输出的 tool call 经过 `_tool_calls_to_routed_dict()` normalize 后，内部协议统一为：
+
+#### analyze（action）
+
+```json
+{
+  "action": "analyze",
+  "symbols": ["AU9999"],  // 统一使用 symbols 列表，不再使用 symbol 单数字段
+  "interval": "1d",
+  "provider": "goldapi",
+  "question": "上海金今天走势",
+  "with_research": false
+}
+```
+
+**约束**：
+- 单标的也必须是 `symbols` 长度为 1 的列表
+- 下游代码只消费 `symbols`，不再处理 `symbol` 单数
+
+#### research（action）
+
+```json
+{
+  "action": "research",
+  "keyword": "半导体",
+  "symbol": ""  // 可为空字符串
+}
+```
+
+#### chat（action）
+
+```json
+{
+  "action": "chat",
+  "chat_reply": "..."
+}
+```
+
+#### followup（action）
+
+```json
+{
+  "action": "followup",
+  "followup_context": {...}
+}
+```
+
+**关键点**：
+- 协议统一发生在边界层
+- 下游不再承担 shape 修复职责
+
+### runtime clarify 状态（已完成）
+
+**状态**：app runtime 中的 clarify 生命周期已经清理完成。
+
+当前代码状态：
+1. `TaskType` 已不再包含 `clarify`。
+2. `AgentResponse` / adapter fallback 已统一为 chat-style fallback。
+3. app 层不再保留 clarify 专用错误码或执行分支。
+
+历史文档、旧讨论或外包汇报中仍可能出现 `clarify` 字样，但它们不再代表当前 runtime 主链路。
+
+### 结构化错误模型（已完成）
+
+**原则**：失败和拒绝不应该只是日志文本，而应该是状态机可以消费的结构化事件。
+
+核心字段：
+- `error_code`：错误码枚举（如 route_missing_symbols、followup_missing_symbol）
+- `error_stage`：错误阶段（route / execute / infra / unknown）
+- `recoverable`：是否可恢复（用于决定是否触发 reroute）
+- `termination_reason`：最终终止原因（success / error_code / max_attempts_reached）
+
+错误码第一批（已落地）：
+1. `route_missing_symbols`
+2. `route_invalid_symbol`
+3. `route_missing_chat_reply`
+4. `route_empty_message`
+5. `route_unknown_action`
+6. `followup_missing_symbol`
+7. `followup_output_missing`
+8. `execute_analysis_failed`
+9. `execute_quote_failed`
+10. `db_unavailable`
+11. `analysis_backend_unavailable`
+12. `rag_unavailable`
+13. `unknown`
+
+### 轻量容错闭环（已完成 route 层）
+
+**原则**：最多一次 repair，不是无限 agent loop。
+
+**当前状态**：
+
+| 内容 | 状态 |
+|------|------|
+| session_state 容错字段 | 已完成 |
+| AgentRoutingError 结构化错误 | 已完成 |
+| route 层 reroute | **已完成** |
+| 执行层错误细分 | **进行中**：第一轮 execute mapping 已收口；已区分 `db_unavailable`、`analysis_backend_unavailable`、`rag_unavailable`、`execute_provider_timeout`、`execute_writer_failed`、`followup_output_missing`，generic execute fallback 仍可能落到 `unknown` |
+| 执行层错误接入 reroute | **未定**：待讨论 |
+
+已实现内容：
+
+1. `agent_core.py` 实现 `max_route_attempts = 2`（for 循环）
+2. `_build_repair_recent_messages()` 构造修正提示，包含 error_code、termination_reason
+3. 只对 `error_stage=route` 且 `recoverable=True` 的 route error 启用 reroute
+4. 第二次 route 仍失败，返回 `termination_reason="max_route_attempts_reached"`
+
+**关键边界**：
+
+| 错误类型 | 是否接入 reroute | 当前行为 |
+|----------|------------------|----------|
+| recoverable route error | **是** | 第一次失败后构造修正提示，第二次 route |
+| non-recoverable route error | **否** | 直接终止，返回 fallback + structured meta |
+| 执行层错误（execute_* / infra_*） | **否** | 直接终止；第一轮 execute mapping 已收口，剩余未识别异常才回退到 `unknown` |
+
+**不引入**：
+- 多 Agent 协调
+- 复杂 Task UI
+- 长链计划模式
+- 重型复杂度
+
+### 会话状态容错字段（已完成）
+
+`session_state.py` 新增字段：
+- `last_symbols`：本轮 symbols（推荐使用，兼容 `last_symbol`）
+- `route_attempts`：当前请求路由尝试次数
+- `last_error_code`：最近一次错误码
+- `repair_history`：修正历史（list[dict]）
+- `termination_reason`：最终终止原因
+
+**验证标准**：
+- 一轮请求结束后，session state 能记录本轮 symbols
+- 发生错误时，至少能记录 last_error_code
+- 成功时能记录 termination_reason="success"
+
+---
+
+## 容错改造阶段状态
+
+根据 [docs/AGENT_LOOP_TOLERANCE_REFACTOR.md](docs/AGENT_LOOP_TOLERANCE_REFACTOR.md)：
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| 阶段 0 | 文档与契约先行 | **已完成** |
+| 阶段 1 | 边界统一（route contract） | **已完成** |
+| 阶段 2 | 结构化错误模型 | **已完成** |
+| 阶段 3 | 最小 reroute loop（route 层） | **已完成** |
+| 阶段 3.1 | 执行层错误细分 | **进行中** |
+| 阶段 4 | 生命周期 hooks 与审计 | **暂缓** |
+
+**当前优先级**：完成阶段 3.1 的执行层错误细分。
+
+当前判断：阶段 3.1 已完成第一轮 execute mapping 收口，后续重点是继续补齐 execute 子原因并压缩 `unknown`。

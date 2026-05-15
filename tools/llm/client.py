@@ -76,13 +76,14 @@ def _feishu_router_interval_instruction(*, short_iv: str) -> str:
 
 
 # 未配置 feishu.llm_router_system_prompt 时使用；以 tools 为主，无 tool_calls 时见 decide_feishu_route 对 assistant 正文的兜底。
-DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报/板块/归属/概念检索）。
+DEFAULT_FEISHU_ROUTER_SYSTEM_PROMPT = """你是飞书行情分析机器人的路由器（股票 tickflow、贵金属 goldapi、加密 gateio；可选研报/板块/归属/概念检索；模拟账户余额/持仓/订单/成交查看）。
 优先调用提供的工具之一完成意图；不要编造成交、主力资金、交易所逐笔资金流、仓位或「已下单」类结论。
 闲聊、致谢或引导用户发起行情分析时，请使用 reply_chat：message 可写多段完整中文，可简要归类列出用户 JSON 里 tradable_assets 相关标的与示例问法（不必抄全表名，分类说明即可）。
 若模型接口未返回 tool_calls、仅在 assistant 正文中输出内容，后端也会把正文交给用户；但仍应优先用 reply_chat(message=...) 一次性给出可读回复。
 用户消息 JSON 中含 tradable_assets（来自 market_config）、default_symbol、default_interval、short_term_interval_default。
-行情分析必须调用 analyze_market：symbol 或 symbols 只能从 tradable_assets 里的 symbol 选取；多标的时 symbols 至少 2 项。
+行情分析必须调用 analyze_market：symbols 只能从 tradable_assets 里的 symbol 选取；单标的也必须传长度为 1 的 symbols 列表，不要传 symbol 单数字段。
 如用户问题涉及"查研报""查板块""查归属""查概念""查主题"或类似表达，优先调用 search_research 或 query_concept_board 工具（如仅有关键词可只填 keyword，若有 symbol 可一并填写）。
+如用户问题涉及"余额""资金""账户""持仓""订单""成交""仓位""模拟账户"或类似表达，优先调用 view_sim_account 工具。scope 默认 overview（综合），用户明确只问持仓/订单/成交等时可指定 scope。
 如用户问题同时涉及行情分析与研报/板块/归属检索，需分别调用 analyze_market 与 search_research/query_concept_board，并分栏输出。
 不得将研报检索或板块归属混入行情分析主流程。
 口语里 eth/btc/sol 等须映射为表中存在的代码（如 *_USDT）。
@@ -105,12 +106,12 @@ def _feishu_router_tool_definitions() -> list[dict[str, Any]]:
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "单标的代码，如 BTC_USDT、NVDA；与 symbols 二选一",
+                            "description": "兼容旧字段：单标的代码，如 BTC_USDT、NVDA；内部会被折叠为 symbols=[symbol]，新输出应优先使用 symbols",
                         },
                         "symbols": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "多标的（至少 2 个），与 symbol 二选一",
+                            "description": "标的代码列表；单标的也必须传单元素列表，如 [\"BTC_USDT\"]",
                         },
                         "interval": {
                             "type": "string",
@@ -198,14 +199,25 @@ def _feishu_router_tool_definitions() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "ask_clarify",
-                "description": "无法从当前句与上下文确定合法标的或周期时，说明缺什么。",
+                "name": "view_sim_account",
+                "description": "查看模拟账户状态：余额、持仓、挂单、成交、活动想法、对账统计。用户问「余额/资金/账户/持仓/订单/成交/仓位/模拟账户」时使用。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "message": {"type": "string", "description": "澄清说明"},
+                        "scope": {
+                            "type": "string",
+                            "description": "查询范围：overview（综合）、positions（持仓）、active_ideas（活动想法）、orders（委托）、fills（成交）、health（对账统计）",
+                        },
+                        "account_id": {
+                            "type": "string",
+                            "description": "可选，指定账户 ID 如 CNY/USD",
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "description": "可选，指定标的代码",
+                        },
                     },
-                    "required": ["message"],
+                    "required": [],
                 },
             },
         },
@@ -222,14 +234,21 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
-def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
-    """将第一条 tool_call 转为 route_user_message 所需的 dict（含 action 等）。"""
-    if not isinstance(tool_calls, list) or not tool_calls:
-        raise LLMClientError("路由 tool_calls 为空")
-    tc0 = tool_calls[0]
-    if not isinstance(tc0, dict):
+def _dedupe_str_list(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _single_tool_call_to_routed_dict(tool_call: Any) -> dict[str, Any]:
+    if not isinstance(tool_call, dict):
         raise LLMClientError("路由 tool_call 结构异常")
-    fn = tc0.get("function")
+    fn = tool_call.get("function")
     if not isinstance(fn, dict):
         raise LLMClientError("路由 tool_call.function 缺失")
     name = str(fn.get("name") or "").strip()
@@ -240,10 +259,13 @@ def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
         sym = args.get("symbol")
         syms = args.get("symbols")
         out: dict[str, Any] = {"action": "analyze"}
+        normalized_symbols: list[str] = []
+        if isinstance(syms, list):
+            normalized_symbols.extend(str(x).strip() for x in syms if str(x).strip())
         if isinstance(sym, str) and sym.strip():
-            out["symbol"] = sym.strip()
-        if isinstance(syms, list) and len(syms) >= 2:
-            out["symbols"] = [str(x).strip() for x in syms if str(x).strip()]
+            normalized_symbols.append(sym.strip())
+        if normalized_symbols:
+            out["symbols"] = _dedupe_str_list(normalized_symbols)
         iv = str(args.get("interval") or "").strip().lower()
         if iv:
             out["interval"] = iv
@@ -291,7 +313,78 @@ def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
         if isinstance(msg, str) and msg.strip():
             return {"action": "chat", "chat_reply": msg.strip()}
         return {"action": "chat"}
+
+    if name == "view_sim_account":
+        out: dict[str, Any] = {"action": "sim_account"}
+        scope = args.get("scope")
+        if isinstance(scope, str) and scope.strip():
+            out["scope"] = scope.strip()
+        aid = args.get("account_id")
+        if isinstance(aid, str) and aid.strip():
+            out["account_id"] = aid.strip()
+        sym = args.get("symbol")
+        if isinstance(sym, str) and sym.strip():
+            out["symbol"] = sym.strip()
+        return out
+
     raise LLMClientError(f"未知路由工具: {name!r}")
+
+
+def _merge_tool_routes(routes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not routes:
+        raise LLMClientError("路由 tool_calls 为空")
+    if len(routes) == 1:
+        return routes[0]
+
+    actionable = [dict(r) for r in routes if str(r.get("action") or "") != "chat"]
+    if not actionable:
+        return routes[0]
+
+    analyze_steps = [dict(r) for r in actionable if str(r.get("action") or "") == "analyze"]
+    research_steps = [
+        dict(r) for r in actionable
+        if str(r.get("action") or "") in {"research", "concept_board"}
+    ]
+
+    if analyze_steps:
+        merged = dict(analyze_steps[0])
+
+        merged_symbols: list[str] = []
+        for step in analyze_steps:
+            symbols = step.get("symbols")
+            if isinstance(symbols, list):
+                merged_symbols.extend(str(item).strip() for item in symbols if str(item).strip())
+        if merged_symbols:
+            merged["symbols"] = _dedupe_str_list(merged_symbols)
+
+        if research_steps or any(bool(step.get("with_research")) for step in analyze_steps):
+            merged["with_research"] = True
+
+        if not str(merged.get("research_keyword") or "").strip():
+            candidate_keywords: list[str] = []
+            for step in research_steps + analyze_steps:
+                for key in ("keyword", "research_keyword", "symbol"):
+                    value = str(step.get(key) or "").strip()
+                    if value:
+                        candidate_keywords.append(value)
+                        break
+            if candidate_keywords:
+                merged["research_keyword"] = candidate_keywords[0]
+
+        merged["plan_steps"] = [dict(step) for step in routes]
+        return merged
+
+    primary = dict(actionable[0])
+    primary["plan_steps"] = [dict(step) for step in routes]
+    return primary
+
+
+def _tool_calls_to_routed_dict(tool_calls: Any) -> dict[str, Any]:
+    """将 tool_calls 转为 route_user_message 所需的 dict（必要时做兼容性合并）。"""
+    if not isinstance(tool_calls, list) or not tool_calls:
+        raise LLMClientError("路由 tool_calls 为空")
+    routes = [_single_tool_call_to_routed_dict(tc) for tc in tool_calls]
+    return _merge_tool_routes(routes)
 
 
 def _extract_router_assistant_text(message: dict[str, Any]) -> str:

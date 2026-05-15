@@ -2,6 +2,10 @@
 
 职责：保存本轮和上一轮的结构化上下文，不保存完整事实正文。
 只回答一个问题：用户此刻说的"它 / 这个 / xx / 这个入场"指的是哪一轮分析对象？
+
+关键改变：
+1. 错误响应优先视为 chat-style fallback + structured meta。
+2. 新增容错闭环字段：route_attempts, last_error_code, repair_history, termination_reason。
 """
 from __future__ import annotations
 
@@ -16,18 +20,40 @@ from typing import Any, Literal
 
 @dataclass
 class SessionState:
-    """结构化会话状态（按文档 8.1 契约）。"""
+    """结构化会话状态。
+
+    核心字段：
+    - last_action: 最近一次路由 action（analyze / chat / quote / compare / research / followup）
+    - last_task_type: 最近一次任务类型（analysis / quote / compare / research / followup / chat）
+    - last_symbols: 最近一次分析标的列表（推荐使用，单标的也用列表）
+    - last_interval / last_provider / last_question: 辅助上下文
+
+    容错闭环字段：
+    - route_attempts: 当前请求路由尝试次数（每轮请求开始时重置）
+    - last_error_code: 最近一次错误码（如 route_missing_symbols）
+    - repair_history: 修正历史记录（本轮请求的所有尝试）
+    - termination_reason: 最终终止原因（success / error_code / max_attempts_reached）
+
+    兼容字段：
+    - last_symbol: 单标的兼容，推荐使用 last_symbols
+    """
     open_id: str
-    last_action: str = "chat"  # analysis / research / quote / chat / clarify
-    last_task_type: str = "chat"  # analysis / research / compare / quote / chat / clarify
-    last_symbol: str | None = None
-    last_symbols: list[str] = field(default_factory=list)
+    last_action: str = "chat"  # analyze / chat / quote / compare / research / followup
+    last_task_type: str = "chat"  # analysis / quote / compare / research / followup / chat
+    last_symbol: str | None = None  # 兼容单标的场景（推荐使用 last_symbols）
+    last_symbols: list[str] = field(default_factory=list)  # 多标的场景（统一协议）
     last_interval: str | None = None
     last_provider: str | None = None
     last_question: str | None = None
     last_output_refs: dict[str, str] = field(default_factory=dict)  # ai_overview_path, full_report_path 等
-    pending_clarify: bool = False
+
     updated_ts: float = field(default_factory=time.time)
+
+    # 容错闭环字段
+    route_attempts: int = 0  # 当前请求路由尝试次数（每轮请求开始时重置为 0）
+    last_error_code: str | None = None  # 最近一次错误码（如 route_missing_symbols, analysis_backend_unavailable）
+    repair_history: list[dict[str, Any]] = field(default_factory=list)  # 修正历史（本轮所有尝试）
+    termination_reason: str | None = None  # 最终终止原因（success / error_code / max_attempts_reached）
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,8 +66,12 @@ class SessionState:
             "last_provider": self.last_provider,
             "last_question": self.last_question,
             "last_output_refs": self.last_output_refs,
-            "pending_clarify": self.pending_clarify,
             "updated_ts": self.updated_ts,
+            # 新增字段
+            "route_attempts": self.route_attempts,
+            "last_error_code": self.last_error_code,
+            "repair_history": self.repair_history,
+            "termination_reason": self.termination_reason,
         }
 
     @classmethod
@@ -56,8 +86,12 @@ class SessionState:
             last_provider=d.get("last_provider"),
             last_question=d.get("last_question"),
             last_output_refs=dict(d.get("last_output_refs") or {}),
-            pending_clarify=bool(d.get("pending_clarify")),
             updated_ts=float(d.get("updated_ts") or time.time()),
+            # 新增字段
+            route_attempts=int(d.get("route_attempts") or 0),
+            last_error_code=d.get("last_error_code"),
+            repair_history=list(d.get("repair_history") or []),
+            termination_reason=d.get("termination_reason"),
         )
 
 
@@ -120,7 +154,25 @@ class SessionStateStore:
         question: str | None = None,
         output_refs: dict[str, str] | None = None,
     ) -> SessionState:
-        """从路由结果更新状态（统一入口）。"""
+        """从路由结果更新状态（统一入口）。
+
+        注意：
+        - symbols 是统一协议，单标的也用长度为 1 的列表。
+
+        Args:
+            open_id: 用户标识
+            action: 路由 action（analyze / chat / quote / compare / research / followup）
+            task_type: 任务类型（analysis / quote / compare / research / followup / chat）
+            symbol: 单标的（兼容，推荐使用 symbols）
+            symbols: 标的列表（统一协议）
+            interval: 周期
+            provider: 数据源
+            question: 用户问题
+            output_refs: 本轮产物路径（供下一轮追问使用）
+
+        Returns:
+            更新后的 SessionState
+        """
         st = self.get(open_id)
         st.last_action = str(action or "chat").strip().lower()
         st.last_task_type = str(task_type or "chat").strip().lower()
@@ -136,12 +188,117 @@ class SessionStateStore:
             st.last_question = str(question).strip()
         if output_refs:
             st.last_output_refs = dict(output_refs)
-        st.pending_clarify = (action == "clarify")
+        self.update(st)
+        return st
+
+    def record_error(
+        self,
+        open_id: str,
+        *,
+        error_code: str,
+        error_stage: str = "unknown",
+        error_message: str | None = None,
+        recoverable: bool = False,
+    ) -> SessionState:
+        """记录错误信息（用于后续 repair loop）。
+
+        Args:
+            open_id: 用户标识
+            error_code: 错误码（如 route_missing_symbols）
+            error_stage: 错误阶段（route / execute / infra）
+            error_message: 错误详情
+            recoverable: 是否可恢复
+
+        Returns:
+            更新后的 SessionState
+        """
+        st = self.get(open_id)
+        st.last_error_code = str(error_code).strip()
+        attempt = st.route_attempts
+        if str(error_stage or "unknown").strip().lower() == "route":
+            st.route_attempts += 1
+            attempt = st.route_attempts
+
+        # 添加到修正历史
+        repair_entry = {
+            "attempt": attempt,
+            "error_code": error_code,
+            "error_stage": error_stage,
+            "error_message": error_message,
+            "recoverable": recoverable,
+            "timestamp": time.time(),
+        }
+        st.repair_history.append(repair_entry)
+        self.update(st)
+        return st
+
+    def record_success(
+        self,
+        open_id: str,
+        *,
+        termination_reason: str = "success",
+    ) -> SessionState:
+        """记录成功状态。
+
+        Args:
+            open_id: 用户标识
+            termination_reason: 终止原因（默认 success）
+
+        Returns:
+            更新后的 SessionState
+        """
+        st = self.get(open_id)
+        st.termination_reason = str(termination_reason).strip()
+        st.last_error_code = None  # 成功时清空错误码
+        self.update(st)
+        return st
+
+    def record_final_termination(
+        self,
+        open_id: str,
+        *,
+        termination_reason: str,
+        final_error_code: str | None = None,
+    ) -> SessionState:
+        """记录最终终止状态（达到最大尝试次数或其他不可恢复情况）。
+
+        Args:
+            open_id: 用户标识
+            termination_reason: 终止原因（如 max_attempts_reached）
+            final_error_code: 最终错误码（可选）
+
+        Returns:
+            更新后的 SessionState
+        """
+        st = self.get(open_id)
+        st.termination_reason = str(termination_reason).strip()
+        if final_error_code:
+            st.last_error_code = str(final_error_code).strip()
+        self.update(st)
+        return st
+
+    def reset_route_attempts(self, open_id: str) -> SessionState:
+        """重置路由尝试次数（新一轮请求开始时调用）。
+
+        Args:
+            open_id: 用户标识
+
+        Returns:
+            更新后的 SessionState
+        """
+        st = self.get(open_id)
+        st.route_attempts = 0
+        st.last_error_code = None
+        st.termination_reason = None
+        st.repair_history = []  # 清空本轮修正历史
         self.update(st)
         return st
 
     def resolve_followup_target(self, open_id: str, text: str) -> dict[str, Any]:
         """追问目标解析：返回上一轮分析对象。
+
+        注意：
+        - 只检查有效的分析类 action（analyze / research / quote / compare / followup）
 
         返回：
         - symbol: 上一轮标的
@@ -151,7 +308,9 @@ class SessionStateStore:
         - resolved: 是否成功解析
         """
         st = self.get(open_id)
-        if st.last_action not in {"analysis", "research", "quote"}:
+        # 有效追问来源：analyze / research / quote / compare / followup
+        valid_actions = {"analyze", "analysis", "research", "quote", "compare", "followup", "analyze_multi"}
+        if st.last_action not in valid_actions:
             return {"resolved": False, "reason": "上一轮非分析任务"}
         if not st.last_symbol and not st.last_symbols:
             return {"resolved": False, "reason": "上一轮无标的"}

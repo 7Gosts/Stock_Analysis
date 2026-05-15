@@ -28,7 +28,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.agent_schemas import AgentRequest, AgentResponse, DEFAULT_CLARIFY_MESSAGE
+from app.agent_schemas import AgentRequest, AgentResponse, DEFAULT_CHAT_FALLBACK_MESSAGE
 from app.agent_core import handle_request
 from app.memory_store import JsonlMemoryStore, MemoryEvent
 from app.session_state import get_global_session_store
@@ -171,7 +171,7 @@ def build_event_handler(
             app_secret=app_secret,
             sender_open_id=sender_open_id,
             reply_chunks=response.reply_chunks,
-            fallback_text=response.reply_text or DEFAULT_CLARIFY_MESSAGE,
+            fallback_text=response.reply_text or DEFAULT_CHAT_FALLBACK_MESSAGE,
         )
 
         # 6. 写入飞书历史（第三层）
@@ -261,7 +261,7 @@ def send_reply_or_fallback(
         logger.warning("[FeishuAdapter] send_reply_error err={}", exc)
 
 
-def run_feishu_bot(*, api_base_url: str = "http://127.0.0.1:8000", log_level: Any = None) -> None:
+def run_feishu_bot(*, log_level: Any = None) -> None:
     """启动飞书 Bot（adapter 版）。"""
     lark = _import_lark()
     if log_level is None:

@@ -131,7 +131,7 @@ def resolve_mtf_interval_effective(args: Namespace, market: str) -> tuple[str | 
     if mkt == "CRYPTO" or prov == "gateio":
         return "4h", None
     if mkt in {"PM", "GOLD", "METAL"} or prov in {"goldapi", "gold_api", "gold-api"}:
-        return "1w", None
+        return None, "goldapi_auto_mtf_disabled"
     return "1w", None
 
 

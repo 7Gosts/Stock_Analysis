@@ -20,7 +20,8 @@ from typing import Any, Literal
 
 from loguru import logger
 
-from app.analysis_task_client import poll_analysis_result, submit_analysis_task
+from app.agent_schemas import AgentErrorCode, AgentErrorStage, AgentError
+from app.agent_service import TaskRunner
 from app.executors.facts_bundle import merge_facts_bundle
 from app.executors.multi_asset_compare import run_multi_asset_compare
 from app.executors.quote_snapshot import run_quote_snapshots
@@ -39,13 +40,31 @@ from app.writer import (
 )
 
 
-TaskType = Literal["chat", "clarify", "quote", "compare", "analysis", "research", "followup"]
+TaskType = Literal["chat", "quote", "compare", "analysis", "research", "followup"]
 ResponseMode = Literal["quick", "compare", "analysis", "narrative", "followup"]
 
 
 # ============ 本地格式化函数（原 feishu_bot_service 迁移） ============
 
-def _analyze_multiple_symbols_local(*, api_base_url: str, payloads: list[dict[str, Any]]) -> str:
+def _run_analysis_local(*, repo_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """直接调用本地 TaskRunner，避免依赖已删除的 /agent/analyze 旧接口。"""
+    runner = TaskRunner(repo_root=repo_root)
+    return runner.run_analysis(
+        symbol=str(payload.get("symbol") or ""),
+        provider=str(payload.get("provider") or "gateio"),
+        interval=str(payload.get("interval") or "1d"),
+        limit=int(payload.get("limit") or 180),
+        out_dir=payload.get("out_dir"),
+        with_research=bool(payload.get("with_research") or False),
+        research_keyword=payload.get("research_keyword"),
+        question=payload.get("question"),
+        use_rag=bool(payload.get("use_rag", True)),
+        rag_top_k=int(payload.get("rag_top_k") or 5),
+        use_llm_decision=bool(payload.get("use_llm_decision", True)),
+    )
+
+
+def _analyze_multiple_symbols_local(*, repo_root: Path, payloads: list[dict[str, Any]]) -> str:
     """多标的分析本地实现。"""
     cards: list[str] = []
     for payload in payloads:
@@ -53,8 +72,7 @@ def _analyze_multiple_symbols_local(*, api_base_url: str, payloads: list[dict[st
             continue
         sym = str(payload.get("symbol") or "")
         try:
-            task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
-            result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
+            result = _run_analysis_local(repo_root=repo_root, payload=payload)
             chunks = _feishu_reply_chunks_local(result, user_question=str(payload.get("question") or ""))
             cards.append("\n\n".join(chunks))
         except Exception as exc:
@@ -313,13 +331,11 @@ def handle_user_request(
     - session_state (SessionState 对象)
     - conversation_context (可选)
     - recent_messages (可选)
-    - api_base_url (分析类)
     - rag_index (可选，默认从 output 构建)
     """
     ctx = context if isinstance(context, dict) else {}
     default_symbol = str(ctx.get("default_symbol") or "BTC_USDT").strip().upper()
     default_interval = str(ctx.get("default_interval") or "4h").strip().lower()
-    api_base_url = str(ctx.get("api_base_url") or "http://127.0.0.1:8000").strip()
     session_state = ctx.get("session_state")
     recent = ctx.get("recent_messages") if isinstance(ctx.get("recent_messages"), list) else None
     user_q = str(ctx.get("user_message_for_chunks") or text or "").strip()
@@ -340,26 +356,26 @@ def handle_user_request(
     repo_root = _repo_root_from_context(ctx)
     rag_index = ctx.get("rag_index") or get_or_create_rag_index(repo_root / "output")
 
-    # 1. clarify 分支（已保证非空）
-    if task_type == "clarify" or action == "clarify":
-        msg = str(route.get("clarify_message") or "").strip()
-        if not msg:
-            msg = "我这次没有稳定拿到可回答的上下文。你可以补一句标的/周期，或让我重新分析。"
-        return {
-            "task_type": "clarify",
-            "response_mode": "quick",
-            "facts_bundle": None,
-            "final_text": msg,
-            "reply_chunks": [msg],
-            "legacy_action": "clarify",
-            "meta": base_meta,
-        }
-
-    # 2. chat 分支
+    # 1. chat 分支
     if task_type == "chat" or action == "chat":
         msg = str(route.get("chat_reply") or "").strip()
         if not msg:
-            msg = "收到，有什么我可以帮你分析的吗？"
+            agent_err = AgentError(
+                code=AgentErrorCode.route_missing_chat_reply,
+                stage=AgentErrorStage.route,
+                recoverable=True,
+                message="chat route missing chat_reply",
+                termination_reason="llm_output_invalid",
+            )
+            return {
+                "task_type": "chat",
+                "response_mode": "quick",
+                "facts_bundle": None,
+                "final_text": "我这次没有稳定生成回复。你可以补一句标的/周期，或让我重新分析。",
+                "reply_chunks": ["我这次没有稳定生成回复。你可以补一句标的/周期，或让我重新分析。"],
+                "legacy_action": "chat",
+                "meta": {**base_meta, **agent_err.to_meta_dict()},
+            }
         return {
             "task_type": "chat",
             "response_mode": "quick",
@@ -370,7 +386,7 @@ def handle_user_request(
             "meta": base_meta,
         }
 
-    # 3. followup 分支（新增：不重新跑行情，只读取本地产物）
+    # 2. followup 分支（新增：不重新跑行情，只读取本地产物）
     if task_type == "followup" or action == "followup":
         followup_ctx = route.get("followup_context") or {}
         symbol = followup_ctx.get("symbol")
@@ -378,15 +394,21 @@ def handle_user_request(
         output_refs = followup_ctx.get("output_refs") or {}
 
         if not symbol:
-            msg = "无法确认你要追问的行情标的，您可以重新输入股票代码或查询对应板块。"
+            agent_err = AgentError(
+                code=AgentErrorCode.followup_missing_symbol,
+                stage=AgentErrorStage.route,
+                recoverable=True,
+                message="followup route missing symbol",
+                termination_reason="followup_context_invalid",
+            )
             return {
-                "task_type": "clarify",
-                "response_mode": "quick",
+                "task_type": "followup",
+                "response_mode": "followup",
                 "facts_bundle": None,
-                "final_text": msg,
-                "reply_chunks": [msg],
-                "legacy_action": "clarify",
-                "meta": base_meta,
+                "final_text": "无法定位追问对象，请补充标的名称。",
+                "reply_chunks": ["无法定位追问对象，请补充标的名称。"],
+                "legacy_action": "followup",
+                "meta": {**base_meta, **agent_err.to_meta_dict()},
             }
 
         # 从 RAG 或 output_refs 获取事实
@@ -536,7 +558,7 @@ def handle_user_request(
             facts_bundle=fb, user_question=user_q, task_type="analysis", response_mode="analysis"
         )
         if not chunks:
-            flat = _analyze_multiple_symbols_local(api_base_url=api_base_url, payloads=payloads)
+            flat = _analyze_multiple_symbols_local(repo_root=repo_root, payloads=payloads)
             chunks = split_feishu_text(flat)
         return {
             "task_type": "analysis",
@@ -615,7 +637,27 @@ def handle_user_request(
 
     # 5.2 quote 分支
     if task_type == "quote":
-        qf = run_quote_snapshots(repo_root=repo_root, payloads=[payload])
+        try:
+            qf = run_quote_snapshots(repo_root=repo_root, payloads=[payload])
+        except Exception as exc:
+            is_timeout = isinstance(exc, TimeoutError) or "timeout" in str(exc).lower() or "超时" in str(exc)
+            agent_err = AgentError(
+                code=AgentErrorCode.execute_provider_timeout if is_timeout else AgentErrorCode.execute_quote_failed,
+                stage=AgentErrorStage.execute,
+                recoverable=True,
+                message=f"价格快照异常：{exc}",
+                termination_reason="quote_provider_timeout" if is_timeout else "quote_snapshot_failed",
+            )
+            err = f"价格快照失败：{exc}"
+            return {
+                "task_type": "quote",
+                "response_mode": "quick",
+                "facts_bundle": None,
+                "final_text": err,
+                "reply_chunks": split_feishu_text(err),
+                "legacy_action": "analyze",
+                "meta": {**base_meta, **agent_err.to_meta_dict()},
+            }
         fb = merge_facts_bundle(
             task_type="quote",
             response_mode="quick",
@@ -644,11 +686,17 @@ def handle_user_request(
             "meta": base_meta,
         }
 
-    # 5.3 单标的完整分析（HTTP 异步）
+    # 5.3 单标的完整分析（本地 TaskRunner）
     try:
-        task_id = submit_analysis_task(api_base_url=api_base_url, payload=payload)
-        result = poll_analysis_result(api_base_url=api_base_url, task_id=task_id)
+        result = _run_analysis_local(repo_root=repo_root, payload=payload)
     except Exception as exc:
+        agent_err = AgentError(
+            code=AgentErrorCode.analysis_backend_unavailable,
+            stage=AgentErrorStage.infra,
+            recoverable=True,
+            message=f"分析后端异常：{exc}",
+            termination_reason="analysis_backend_unavailable",
+        )
         err = f"分析失败：{exc}"
         return {
             "task_type": "analysis",
@@ -657,7 +705,7 @@ def handle_user_request(
             "final_text": err,
             "reply_chunks": split_feishu_text(err),
             "legacy_action": "analyze",
-            "meta": {**base_meta, "error": str(exc)},
+            "meta": {**base_meta, **agent_err.to_meta_dict()},
         }
 
     # 提取 narrative facts
@@ -685,11 +733,12 @@ def handle_user_request(
         market_facts={"analysis_facts": narrative_facts},
         risk_flags=result.get("risk_flags") if isinstance(result.get("risk_flags"), list) else [],
         evidence_sources=result.get("evidence_sources") if isinstance(result.get("evidence_sources"), list) else [],
-        trace={"executors": ["http_langgraph"], "task_id": task_id},
+        trace={"executors": ["local_task_runner"], "task_mode": "local"},
     )
 
     # 尝试多种输出方式
     chunks: list[str] | None = None
+    writer_error_message: str | None = None
     if grounded_writer_enabled():
         chunks = _try_grounded_chunks(
             facts_bundle=fb, user_question=user_q, task_type="analysis", response_mode="analysis"
@@ -698,12 +747,31 @@ def handle_user_request(
         try:
             body = write_legacy_narrative_if_enabled(facts=narrative_facts, user_question=user_q)
             chunks = split_feishu_text(body)
-        except Exception:
+        except Exception as exc:
+            writer_error_message = f"legacy_writer_failed: {exc}"
             chunks = None
     if not chunks and fallback_to_template_reply_enabled():
         flat = _format_fixed_template_reply_local(result, user_question=user_q)
         chunks = split_feishu_text(flat)
     if not chunks:
+        if writer_error_message:
+            agent_err = AgentError(
+                code=AgentErrorCode.execute_writer_failed,
+                stage=AgentErrorStage.execute,
+                recoverable=True,
+                message=writer_error_message,
+                termination_reason="writer_failed",
+            )
+            err = "分析完成，但生成展示文本失败。"
+            return {
+                "task_type": "analysis",
+                "response_mode": "analysis",
+                "facts_bundle": fb,
+                "final_text": err,
+                "reply_chunks": split_feishu_text(err),
+                "legacy_action": "analyze",
+                "meta": {**base_meta, **agent_err.to_meta_dict()},
+            }
         chunks = split_feishu_text("分析完成，但未能生成展示文本。")
 
     # 记录 output_refs 用于后续追问
@@ -722,5 +790,5 @@ def handle_user_request(
         "final_text": "\n\n".join(chunks),
         "reply_chunks": chunks,
         "legacy_action": "analyze",
-        "meta": {**base_meta, "task_id": task_id, "output_refs": output_refs},
+        "meta": {**base_meta, "output_refs": output_refs},
     }

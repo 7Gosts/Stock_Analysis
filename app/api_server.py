@@ -7,7 +7,7 @@
 4. 返回统一 response schema
 
 统一接口：
-- /agent/run：统一 agent 入口（支持 chat/clarify/research/followup/analysis）
+- /agent/run：统一 agent 入口（支持 chat/research/followup/analysis/quote/compare）
 - /health：健康检查
 
 文档参考：
@@ -79,7 +79,7 @@ def health() -> dict[str, str]:
 def run_agent(req: AgentRunRequest) -> AgentRunResponse:
     """统一 Agent 入口。
 
-    支持：chat / clarify / quote / compare / analysis / research / followup
+    支持：chat / quote / compare / analysis / research / followup
 
     流程：
     1. 构造 AgentRequest

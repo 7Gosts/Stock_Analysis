@@ -1,5 +1,7 @@
 # 常用 SQL 速查（AI / 人工只读）
 
+本文件是“手工排查 / 运营速查”的 SQL 参考，不等于运行时查询能力层。若要把行情、研报、模拟账户做成统一 Agent 能力，设计说明见 `docs/UNIFIED_DATA_CAPABILITY_ARCHITECTURE.md`。
+
 面向「问数据库里账户、纸单、台账各有多少、最新一行是什么」等场景。**只读**示例；写入以应用代码与 `sql/` 下 DML 为准。表含义见 `docs/DATABASE_DESIGN.md`。
 
 连接：使用项目配置里的 `database.postgres.dsn`（`psql`、DBeaver、或 `python -c "from persistence.db import get_sqlalchemy_engine; ..."`）。

@@ -8,6 +8,11 @@
 - 与 session_state.py 完全分离
 - 只存储飞书消息文本，不存储结构化状态
 - 不作为事实源本体（文档要求：历史消息只用于消歧与语言承接）
+- action 字段仅供辅助标注，不决定当前执行路径
+
+注意：
+- action 字段仅用于历史辅助标注，不决定当前执行路径
+- symbol / interval 仅用于辅助标注，不作为事实源
 """
 from __future__ import annotations
 
@@ -26,13 +31,19 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 @dataclass
 class MemoryEvent:
-    """飞书历史事件（只存储消息文本，不存储结构化事实）。"""
+    """飞书历史事件（只存储消息文本，不存储结构化事实）。
+
+    注意：
+    - action 字段仅用于历史辅助标注，不决定当前执行路径
+    - symbol / interval 仅用于辅助标注，不作为事实源
+    """
     open_id: str
     role: str  # user / assistant
     text: str
-    action: str | None = None  # clarify / chat / analyze / followup
+    action: str | None = None  # analyze / chat / followup / quote / research
     symbol: str | None = None  # 仅用于辅助标注，不作为事实源
     interval: str | None = None
+    question: str | None = None  # 用户原始问题（用于辅助标注）
     created_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -48,6 +59,8 @@ class MemoryEvent:
             d["symbol"] = self.symbol
         if self.interval:
             d["interval"] = self.interval
+        if self.question:
+            d["question"] = self.question
         return d
 
 

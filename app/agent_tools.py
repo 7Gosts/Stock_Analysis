@@ -59,4 +59,31 @@ def make_tools(*, repo_root: Path) -> list[Any]:
             analysis_style=analysis_style,
         )
 
-    return [fetch_analysis_bundle]
+    @tool
+    def view_sim_account_state(
+        scope: str = "overview",
+        account_id: str | None = None,
+        symbol: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """查看模拟账户状态。
+
+        scope 可选值：
+        - overview: 余额 + 持仓 + 活动想法 + 对账统计
+        - positions: 当前未平仓持仓
+        - active_ideas: watch/pending/filled 的活动交易想法
+        - orders: 最近委托
+        - fills: 最近成交
+        - health: order/fill 对账统计
+        """
+        from app.capabilities.sim_account_capability import view_sim_account_state as _view
+
+        result = _view(
+            scope=scope,
+            account_id=account_id,
+            symbol=symbol,
+            limit=limit,
+        )
+        return result.to_dict()
+
+    return [fetch_analysis_bundle, view_sim_account_state]

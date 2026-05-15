@@ -14,13 +14,81 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal
 import time
 
 
 ChannelType = Literal["feishu", "cli", "http", "test"]
-TaskType = Literal["chat", "clarify", "quote", "compare", "analysis", "research", "followup"]
-ResponseMode = Literal["quick", "compare", "analysis", "narrative", "followup"]
+TaskType = Literal["chat", "quote", "compare", "analysis", "research", "followup", "sim_account"]
+ResponseMode = Literal["quick", "compare", "analysis", "narrative", "followup", "sim_account"]
+
+
+class AgentErrorCode(str, Enum):
+    """Agent 错误码枚举。
+
+    分三类：
+    - route_*: 路由阶段错误
+    - execute_*: 执行阶段错误
+    - infra_*: 基础设施错误
+    """
+    # Route 阶段错误
+    route_missing_symbols = "route_missing_symbols"
+    route_invalid_symbol = "route_invalid_symbol"
+    route_missing_chat_reply = "route_missing_chat_reply"
+    route_empty_message = "route_empty_message"
+    route_unknown_action = "route_unknown_action"
+
+    # Followup 阶段错误
+    followup_missing_symbol = "followup_missing_symbol"
+    followup_output_missing = "followup_output_missing"
+
+    # Execute 阶段错误
+    execute_analysis_failed = "execute_analysis_failed"
+    execute_quote_failed = "execute_quote_failed"
+    execute_provider_timeout = "execute_provider_timeout"
+    execute_writer_failed = "execute_writer_failed"
+
+    # Infra 错误
+    db_unavailable = "db_unavailable"
+    analysis_backend_unavailable = "analysis_backend_unavailable"
+    rag_unavailable = "rag_unavailable"
+
+    # 其他
+    unknown = "unknown"
+
+
+class AgentErrorStage(str, Enum):
+    """错误发生阶段。"""
+    route = "route"
+    execute = "execute"
+    infra = "infra"
+    unknown = "unknown"
+
+
+@dataclass(frozen=True)
+class AgentError:
+    """结构化错误信息。
+
+    用于填充 AgentResponse.meta，供后续 repair loop 使用。
+    """
+    code: AgentErrorCode
+    stage: AgentErrorStage
+    recoverable: bool
+    message: str
+    termination_reason: str | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+
+    def to_meta_dict(self) -> dict[str, Any]:
+        """转换为 meta 字典格式。"""
+        return {
+            "error_code": self.code.value,
+            "error_stage": self.stage.value,
+            "recoverable": self.recoverable,
+            "termination_reason": self.termination_reason,
+            "error_message": self.message,
+            "error_context": self.context,
+        }
 
 
 @dataclass
@@ -219,23 +287,6 @@ class AgentResponse:
         )
 
     @classmethod
-    def clarify(
-        cls,
-        *,
-        message: str,
-        meta: dict[str, Any] | None = None,
-    ) -> "AgentResponse":
-        """构造澄清响应。"""
-        return cls(
-            task_type="clarify",
-            response_mode="quick",
-            reply_text=message,
-            reply_chunks=[message] if message else [],
-            facts_bundle=None,
-            meta=meta or {},
-        )
-
-    @classmethod
     def chat(
         cls,
         *,
@@ -259,13 +310,20 @@ class AgentResponse:
         error_msg: str,
         fallback_text: str | None = None,
         meta: dict[str, Any] | None = None,
+        agent_error: AgentError | None = None,
     ) -> "AgentResponse":
-        """构造错误响应（必须有 fallback_text）。"""
+        """构造错误响应（必须有 fallback_text）。
+
+        Returns:
+            AgentResponse 包含结构化错误信息在 meta 中
+        """
         reply = fallback_text or "我这次没有稳定生成回复。你可以补一句标的/周期，或让我重新分析。"
         m = meta or {}
         m["error"] = error_msg
+        if agent_error is not None:
+            m.update(agent_error.to_meta_dict())
         return cls(
-            task_type="clarify",
+            task_type="chat",
             response_mode="quick",
             reply_text=reply,
             reply_chunks=[reply],
@@ -273,9 +331,8 @@ class AgentResponse:
             meta=m,
         )
 
-
-# 统一澄清文案（按文档要求：永不返回空 clarify）
-DEFAULT_CLARIFY_MESSAGE = (
+# 统一 chat-style fallback 文案（空结果也必须显式回复）
+DEFAULT_CHAT_FALLBACK_MESSAGE = (
     "我这次没有稳定拿到可回答的上下文。"
     "你可以补一句标的/周期，或让我重新分析。"
 )
@@ -284,3 +341,104 @@ DEFAULT_FALLBACK_MESSAGE = (
     "分析完成，但未能生成展示文本。"
     "仅供技术分析与程序化演示，不构成投资建议。"
 )
+
+
+# ============ 错误码默认属性映射 ============
+
+ERROR_CODE_DEFAULTS: dict[AgentErrorCode, dict[str, Any]] = {
+    AgentErrorCode.route_missing_symbols: {
+        "stage": AgentErrorStage.route,
+        "recoverable": True,
+        "termination_reason": "路由未识别有效标的",
+    },
+    AgentErrorCode.route_invalid_symbol: {
+        "stage": AgentErrorStage.route,
+        "recoverable": True,
+        "termination_reason": "路由识别的标的不在可交易列表中",
+    },
+    AgentErrorCode.route_missing_chat_reply: {
+        "stage": AgentErrorStage.route,
+        "recoverable": False,
+        "termination_reason": "chat 路由缺少回复文本",
+    },
+    AgentErrorCode.route_empty_message: {
+        "stage": AgentErrorStage.route,
+        "recoverable": False,
+        "termination_reason": "用户输入为空",
+    },
+    AgentErrorCode.route_unknown_action: {
+        "stage": AgentErrorStage.route,
+        "recoverable": False,
+        "termination_reason": "路由返回未知 action",
+    },
+    AgentErrorCode.followup_missing_symbol: {
+        "stage": AgentErrorStage.route,
+        "recoverable": True,
+        "termination_reason": "追问路由缺少标的",
+    },
+    AgentErrorCode.followup_output_missing: {
+        "stage": AgentErrorStage.execute,
+        "recoverable": True,
+        "termination_reason": "追问所需的输出产物不存在",
+    },
+    AgentErrorCode.execute_analysis_failed: {
+        "stage": AgentErrorStage.execute,
+        "recoverable": True,
+        "termination_reason": "分析执行失败",
+    },
+    AgentErrorCode.execute_quote_failed: {
+        "stage": AgentErrorStage.execute,
+        "recoverable": True,
+        "termination_reason": "价格快照执行失败",
+    },
+    AgentErrorCode.execute_provider_timeout: {
+        "stage": AgentErrorStage.execute,
+        "recoverable": True,
+        "termination_reason": "分析数据获取超时",
+    },
+    AgentErrorCode.execute_writer_failed: {
+        "stage": AgentErrorStage.execute,
+        "recoverable": True,
+        "termination_reason": "分析结果生成失败",
+    },
+    AgentErrorCode.db_unavailable: {
+        "stage": AgentErrorStage.infra,
+        "recoverable": True,
+        "termination_reason": "PostgreSQL 数据库不可用",
+    },
+    AgentErrorCode.analysis_backend_unavailable: {
+        "stage": AgentErrorStage.infra,
+        "recoverable": True,
+        "termination_reason": "分析后端服务不可用",
+    },
+    AgentErrorCode.rag_unavailable: {
+        "stage": AgentErrorStage.infra,
+        "recoverable": True,
+        "termination_reason": "RAG 索引不可用",
+    },
+    AgentErrorCode.unknown: {
+        "stage": AgentErrorStage.unknown,
+        "recoverable": False,
+        "termination_reason": "未知错误",
+    },
+}
+
+
+def make_agent_error(
+    code: AgentErrorCode,
+    message: str = "",
+    context: dict[str, Any] | None = None,
+) -> AgentError:
+    """根据错误码快速构建结构化错误。
+
+    自动从 ERROR_CODE_DEFAULTS 中填充默认属性。
+    """
+    defaults = ERROR_CODE_DEFAULTS.get(code, {})
+    return AgentError(
+        code=code,
+        stage=defaults.get("stage", AgentErrorStage.unknown),
+        recoverable=defaults.get("recoverable", False),
+        message=message,
+        termination_reason=defaults.get("termination_reason", ""),
+        context=context or {},
+    )

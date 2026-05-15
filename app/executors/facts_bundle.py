@@ -29,7 +29,7 @@ def merge_facts_bundle(
     """统一事实包：供 writer / guardrail 消费。
 
     Args:
-        task_type: 任务类型（chat/clarify/quote/compare/analysis/research/followup）
+        task_type: 任务类型（chat/quote/compare/analysis/research/followup）
         response_mode: 回复模式
         user_question: 用户原始问题
         symbols: 标的列表
